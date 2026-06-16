@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import ssl
 import asyncio
-from urllib.parse import urlsplit
 from typing import Literal, AsyncIterator
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
+from importlib.metadata import version
 
 from aioquic.asyncio import connect as quic_connect
 from aioquic.asyncio.protocol import QuicConnectionProtocol
@@ -22,7 +23,7 @@ MAX_RESPONSE_HEADER_SIZE = 64 * 1024
 
 @dataclass
 class Config:
-    user_agent: str = "Koromo"
+    user_agent: str = f"Kaede/{version('nercone-kaede')} (+https://github.com/nercone-momiji/kaede/)"
 
     protocols: list[Literal["http/1.1", "h2", "h3"]] = field(default_factory=lambda: ["h3", "h2", "http/1.1"])
 
@@ -595,8 +596,8 @@ class H3ClientProtocol(QuicConnectionProtocol):
         if self.h3 is None:
             self.h3 = H3(self._quic, max_body_size=self.handler.config.max_body_size if self.handler else 16 * 1024 * 1024)
 
-        for koromo_event in self.h3.handle_event_client(event):
-            dispatch_event(self.streams, koromo_event)
+        for kaede_event in self.h3.handle_event_client(event):
+            dispatch_event(self.streams, kaede_event)
 
     def connection_lost(self, exc: BaseException | None):
         self.closed = True

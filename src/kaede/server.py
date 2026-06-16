@@ -25,7 +25,7 @@ from .websocket import WebSocket, PerMessageDeflate, compute_accept, parse_frame
 
 @dataclass
 class Config:
-    server_name: str = "Koromo"
+    server_name: str = "Kaede"
 
     bind_unix:  list[os.PathLike] = field(default_factory=list)
     bind_http:  list[str] = field(default_factory=lambda: ["127.0.0.1:80", "[::1]:80"])

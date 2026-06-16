@@ -87,7 +87,7 @@ class Callback:
         self.websocket_subprotocols: list[str] = []
 
     async def on_request(self, request: Request) -> Response | Awaitable[Response]:
-        return Response("Hello, World! This is the Response from the default Koromo Callback.".encode(), content_type="text/plain")
+        return Response("Hello, World! This is the Response from the default Kaede Callback.".encode(), content_type="text/plain")
 
     async def on_websocket(self, request: Request, ws: WebSocket):
         await ws.close(1008, "WebSocket not configured")

@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "nercone-kaede"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python Library for Processing HTTP Request/Response Simply and Easily"
 readme = { file = "README.md", content-type = "text/markdown" }
 authors = [ { name = "Nercone", email = "nercone@nercone.dev" } ]
@@ -22,6 +22,9 @@ dependencies = [
     "zstandard",
     "brotlicffi"
 ]
+
+[project.urls]
+GitHub = "https://github.com/nercone-momiji/kaede"
 
 [tool.uv.sources]
 aioquic = { git = "https://github.com/nercone-forks/aioquic", branch = "feature/pqc-support" }
