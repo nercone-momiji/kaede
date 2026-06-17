@@ -87,7 +87,7 @@ def decode_transport_parameters(data: bytes) -> dict[int, int | bytes]:
                 out[tp_id] = raw
     return out
 
-class QuicConnection:
+class QUICConnection:
     def __init__(self, *, is_client: bool, tls: QuicTLS, original_dcid: bytes, local_cid: bytes, remote_cid: bytes, peer_completed_cb=None):
         self.is_client = is_client
         self.tls = tls
@@ -134,7 +134,7 @@ class QuicConnection:
         self.needs_advance = True
 
     @classmethod
-    def create_client(cls, tls_factory, server_name: str, local_tp_extra: dict | None = None) -> "QuicConnection":
+    def create_client(cls, tls_factory, server_name: str, local_tp_extra: dict | None = None) -> "QUICConnection":
         local_cid = os.urandom(8)
         original_dcid = os.urandom(8)
         tp = {
@@ -157,7 +157,7 @@ class QuicConnection:
         return cls(is_client=True, tls=tls, original_dcid=original_dcid, local_cid=local_cid, remote_cid=original_dcid)
 
     @classmethod
-    def create_server(cls, first_datagram: bytes, tls_factory, local_tp_extra: dict | None = None) -> "QuicConnection":
+    def create_server(cls, first_datagram: bytes, tls_factory, local_tp_extra: dict | None = None) -> "QUICConnection":
         hdr = packet.parse_long_header(first_datagram, 0)
 
         original_dcid = hdr.destination_cid

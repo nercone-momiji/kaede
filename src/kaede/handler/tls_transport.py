@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 
-from ..tls import RecordTLS
+from ..tls import TLS
 
 class TLSTransport:
-    def __init__(self, raw: asyncio.Transport, engine: RecordTLS):
+    def __init__(self, raw: asyncio.Transport, engine: TLS):
         self.raw = raw
         self.engine = engine
 
@@ -37,11 +37,11 @@ def tls_emit(raw: asyncio.Transport, data: bytes):
     if data and not raw.is_closing():
         raw.write(data)
 
-def tls_start(engine: RecordTLS, raw: asyncio.Transport):
+def tls_start(engine: TLS, raw: asyncio.Transport):
     engine.do_handshake()
     tls_emit(raw, engine.drain())
 
-def tls_feed(engine: RecordTLS, raw: asyncio.Transport, data: bytes) -> tuple[bool, bytes]:
+def tls_feed(engine: TLS, raw: asyncio.Transport, data: bytes) -> tuple[bool, bytes]:
     engine.receive(data)
 
     became_ready = False

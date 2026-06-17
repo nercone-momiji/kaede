@@ -11,8 +11,10 @@ from ..tls import TLSContext, TLSClientConfig
 from ..models import Request, Response, Headers
 from ..process import process_response, wrap_streaming_response
 from ..websocket import WebSocket, generate_key, check_accept
-from ..handler.tcp import TCPClientProtocol, WSClientProtocol
-from ..handler.quic import ClientConnection, connect_quic
+from ..handler.tcp import TCPProtocol, WSClientProtocol
+from ..http.h1 import H1Connection, H1Protocol
+from ..http.h2 import H2Connection
+from ..http.h3 import H3Connection, connect_quic
 
 @dataclass
 class Config:
@@ -73,12 +75,12 @@ def build_request(method: str, url: str, config: Config, headers: dict[str, str]
 
     return request, host, port, authority
 
-class Handler:
+class ClientHandler:
     def __init__(self, config: Config):
         self.config = config
 
         self.shared: dict[tuple, object] = {}
-        self.idle: dict[tuple, list[TCPClientProtocol]] = {}
+        self.idle: dict[tuple, list[H1Connection]] = {}
         self.locks: dict[tuple, asyncio.Lock] = {}
         self.origin_kind: dict[tuple, str] = {}
         self.connections: set = set()
@@ -162,15 +164,24 @@ class Handler:
 
         raise last_error or ConnectionError(f"failed to connect to {host}:{port}")
 
-    async def connect_tcp(self, key: tuple, host: str, port: int, authority: str, tls_context: TLSContext | None) -> TCPClientProtocol:
+    def make_connection(self, protocol: TCPProtocol, alpn: str | None, key: tuple, authority: str):
+        if alpn == "h2":
+            return H2Connection(protocol, is_client=True, key=key, authority=authority)
+        return H1Connection(protocol, is_client=True, key=key, authority=authority)
+
+    async def connect_tcp(self, key: tuple, host: str, port: int, authority: str, tls_context: TLSContext | None):
         loop = asyncio.get_running_loop()
-        protocol = TCPClientProtocol(self, key, authority, tls_context=tls_context, server_name=host if tls_context else None)
+
+        if tls_context is None:
+            protocol = H1Protocol(self, is_client=True, key=key, authority=authority)
+        else:
+            protocol = TCPProtocol(is_client=True, factory=lambda proto, alpn: self.make_connection(proto, alpn, key, authority), tls_context=tls_context, server_name=host, handler=self)
 
         await asyncio.wait_for(loop.create_connection(lambda: protocol, host, port), timeout=self.config.connect_timeout)
         await protocol.ready
-        return protocol
+        return protocol.connection
 
-    async def connect_quic(self, host: str, port: int, authority: str) -> ClientConnection:
+    async def connect_quic(self, host: str, port: int, authority: str) -> H3Connection:
         return await connect_quic(
             self,
             host,
@@ -181,7 +192,7 @@ class Handler:
             connect_timeout=self.config.connect_timeout,
         )
 
-    def release_h1(self, conn: TCPClientProtocol):
+    def release_h1(self, conn: H1Connection):
         if conn.is_open() and conn.reusable:
             self.idle.setdefault(conn.key, []).append(conn)
         else:
@@ -287,7 +298,7 @@ class Handler:
             await asyncio.gather(*self.tasks, return_exceptions=True)
 
         for conn in list(self.connections):
-            if isinstance(conn, ClientConnection):
+            if isinstance(conn, H3Connection):
                 await conn.aclose()
             else:
                 conn.close()
@@ -301,7 +312,7 @@ class Handler:
         self.idle.clear()
 
 class StreamContext:
-    def __init__(self, handler: Handler, method: str, url: str, headers: dict[str, str] | None, body: bytes | None):
+    def __init__(self, handler: ClientHandler, method: str, url: str, headers: dict[str, str] | None, body: bytes | None):
         self.handler = handler
         self.method = method
         self.url = url
@@ -323,7 +334,7 @@ class StreamContext:
 class Client:
     def __init__(self, config: Config | None = None):
         self.config = config or Config()
-        self.handler = Handler(self.config)
+        self.handler = ClientHandler(self.config)
 
     async def request(self, method: str, url: str, *, headers: dict[str, str] | None = None, body: bytes | None = None) -> Response:
         return await self.handler.request(method, url, headers, body, streaming=False)

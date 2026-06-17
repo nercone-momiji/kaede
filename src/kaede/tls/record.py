@@ -29,15 +29,15 @@ class TLSContext:
         verify_hostname = lib.apply_client_config(lib, ctx, config)
         return cls(lib, ctx, keepalive, is_client=True, verify_hostname=verify_hostname)
 
-    def connection(self, server_name: str | None = None) -> "RecordTLS":
-        return RecordTLS(self, server_name=server_name)
+    def connection(self, server_name: str | None = None) -> "TLS":
+        return TLS(self, server_name=server_name)
 
     def free(self):
         if self.ctx:
             self.lib.ssl.SSL_CTX_free(self.ctx)
             self.ctx = 0
 
-class RecordTLS:
+class TLS:
     def __init__(self, context: TLSContext, *, server_name: str | None = None):
         self.context = context
         self.lib = context.lib

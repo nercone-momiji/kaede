@@ -11,8 +11,10 @@ from dataclasses import dataclass, field
 from ..tls import TLSContext, TLSServerConfig
 from ..models import Listener, Callback
 from ..websocket import WebSocket
-from ..handler.tcp import TCPServerProtocol
-from ..handler.quic import QuicServerProtocol
+from ..handler.tcp import TCPProtocol
+from ..http.h1 import H1Connection, H1Protocol
+from ..http.h2 import H2Connection
+from ..http.h3 import H3Protocol
 
 @dataclass
 class Config:
@@ -43,7 +45,7 @@ class Config:
     auto_restart: bool = True
     shutdown_timeout: float = 30
 
-class Handler:
+class ServerHandler:
     def __init__(self, listener: Listener, callback: Callback, config: Config):
         self.listener = listener
         self.callback = callback
@@ -71,19 +73,26 @@ class Handler:
             self._tls_server_context = TLSContext.for_server(self.config.tls, alpn=alpn)
         return self._tls_server_context
 
+    def make_connection(self, protocol: TCPProtocol, alpn: str | None):
+        if alpn == "h2" and "h2" in self.config.protocols:
+            return H2Connection(protocol, is_client=False)
+        if "http/1.1" in self.config.protocols:
+            return H1Connection(protocol, is_client=False)
+        return None
+
     async def start(self):
         loop = asyncio.get_running_loop()
         kind = self.listener.kind
 
         if kind in ("http", "unix"):
-            self.tcp_server = await loop.create_server(lambda: TCPServerProtocol(self), sock=self.listener.sock)
+            self.tcp_server = await loop.create_server(lambda: H1Protocol(self), sock=self.listener.sock)
 
         elif kind == "https":
-            self.tls_server_context()
-            self.tcp_server = await loop.create_server(lambda: TCPServerProtocol(self), sock=self.listener.sock)
+            tls_context = self.tls_server_context()
+            self.tcp_server = await loop.create_server(lambda: TCPProtocol(is_client=False, factory=self.make_connection, tls_context=tls_context, handler=self), sock=self.listener.sock)
 
         elif kind == "quic":
-            transport, _ = await loop.create_datagram_endpoint(lambda: QuicServerProtocol(self), sock=self.listener.sock)
+            transport, _ = await loop.create_datagram_endpoint(lambda: H3Protocol(self), sock=self.listener.sock)
             self.quic_transport = transport
 
         else:
@@ -266,7 +275,7 @@ class Server:
                     pass
 
     async def serve(self, listeners: list[Listener] | None = None):
-        handlers = [Handler(listener, self.callback, self.config) for listener in (listeners if listeners is not None else self.listeners())]
+        handlers = [ServerHandler(listener, self.callback, self.config) for listener in (listeners if listeners is not None else self.listeners())]
 
         for handler in handlers:
             await handler.start()
