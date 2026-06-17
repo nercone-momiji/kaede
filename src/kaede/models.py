@@ -15,11 +15,6 @@ if TYPE_CHECKING:
     from .h3 import H3Info
 
 @dataclass
-class Listener:
-    sock: socket.socket
-    kind: Literal["http", "https", "quic", "unix"]
-
-@dataclass
 class Request:
     method: Literal["GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"]
     target: str
@@ -81,6 +76,11 @@ class ResponseStream:
     status_code: int = 0
     headers: Headers = field(default_factory=lambda: Headers({}))
     body: bytearray = field(default_factory=bytearray)
+
+@dataclass
+class Listener:
+    sock: socket.socket
+    kind: Literal["http", "https", "quic", "unix"]
 
 class Callback:
     def __init__(self):
