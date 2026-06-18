@@ -108,8 +108,8 @@ class Handler:
         if self.tcp_server is not None:
             self.tcp_server.close()
             try:
-                await self.tcp_server.wait_closed()
-            except Exception:
+                await asyncio.wait_for(self.tcp_server.wait_closed(), timeout=5.0)
+            except (asyncio.TimeoutError, Exception):
                 pass
             self.tcp_server = None
 
@@ -130,6 +130,10 @@ class Handler:
                 except Exception:
                     pass
 
+        for transport in list(self.active_transports):
+            if not transport.is_closing():
+                transport.close()
+
         tasks = list(self.active_tasks)
         if tasks:
             _, pending = await asyncio.wait(tasks, timeout=timeout)
@@ -138,11 +142,7 @@ class Handler:
                 task.cancel()
 
             if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-
-        for transport in list(self.active_transports):
-            if not transport.is_closing():
-                transport.close()
+                await asyncio.wait(pending, timeout=5.0)
 
 class Server:
     def __init__(self, callback: Callback, config: Config | None = None):
@@ -313,12 +313,24 @@ class Server:
             await stop
         finally:
             for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, lambda: None)
+                loop.remove_signal_handler(sig)
 
-            await asyncio.gather(*[handler.drain(self.config.shutdown_timeout) for handler in handlers], return_exceptions=True)
+            drain_task = asyncio.ensure_future(asyncio.gather(*[handler.drain(self.config.shutdown_timeout) for handler in handlers], return_exceptions=True))
 
-            for handler in handlers:
-                await handler.stop()
+            def handle_force_quit():
+                if not drain_task.done():
+                    drain_task.cancel()
 
             for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.remove_signal_handler(sig)
+                loop.add_signal_handler(sig, handle_force_quit)
+
+            try:
+                await drain_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.remove_signal_handler(sig)
+
+                for handler in handlers:
+                    await handler.stop()

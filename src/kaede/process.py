@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import asyncio
 import inspect
+import traceback
 import mimetypes
 import email.utils
 
@@ -113,6 +114,7 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
                 response = await response
 
         except Exception:
+            traceback.print_exc()
             response = Response(b"Internal Server Error", status_code=500, compression=False, minification=False)
 
     response.headers.set("Date", email.utils.formatdate(usegmt=True), override=False)
@@ -200,6 +202,7 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
             response.headers.set("Content-Type", response.headers.get("Content-Type", "") + "; charset=utf-8")
 
     except Exception:
+        traceback.print_exc()
         return error_response(request, config)
 
     if request.method == "HEAD":

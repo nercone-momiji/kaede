@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import traceback
 import ipaddress
 from typing import Literal
 from dataclasses import dataclass
@@ -585,7 +586,7 @@ class H2Connection:
         try:
             await self.handler.callback.on_websocket(request, ws)
         except Exception:
-            pass
+            traceback.print_exc()
         finally:
             self.handler.active_websockets.discard(ws)
             if not ws.closed:

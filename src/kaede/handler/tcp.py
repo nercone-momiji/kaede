@@ -12,15 +12,6 @@ from ..websocket import WebSocket, WebSocketProtocolError, parse_frames
 ConnectionFactory = Callable[["TCPProtocol", "str | None"], "object | None"]
 
 class TCPProtocol(asyncio.Protocol):
-    """Generic TCP/TLS asyncio protocol.
-
-    Owns the OS transport, performs the optional TLS handshake and, once the
-    application protocol is known (immediately for plaintext, after the TLS
-    handshake/ALPN otherwise), delegates all byte processing to a connection
-    object produced by ``factory``. The connection object is expected to expose
-    ``start()``, ``feed(data)`` and ``lost(exc)``.
-    """
-
     def __init__(self, *, is_client: bool, factory: ConnectionFactory, tls_context: TLSContext | None = None, server_name: str | None = None, handler=None):
         self.is_client = is_client
         self.factory = factory
@@ -50,7 +41,7 @@ class TCPProtocol(asyncio.Protocol):
             transport.close()
             return
 
-        if not self.is_client and self.handler is not None and isinstance(transport, asyncio.Transport):
+        if not self.is_client and self.handler is not None:
             self.handler.active_transports.add(transport)
 
         if self.tls_context is not None:
