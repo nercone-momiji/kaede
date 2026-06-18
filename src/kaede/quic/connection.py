@@ -17,6 +17,7 @@ AEAD_TAG = 16
 
 TP_ORIGINAL_DCID = 0x00
 TP_MAX_IDLE_TIMEOUT = 0x01
+TP_STATELESS_RESET_TOKEN = 0x02
 TP_MAX_UDP_PAYLOAD = 0x03
 TP_INITIAL_MAX_DATA = 0x04
 TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL = 0x05
@@ -85,7 +86,7 @@ def decode_transport_parameters(data: bytes) -> dict[int, int | bytes]:
         tp_id = buf.pull_uint_var()
         length = buf.pull_uint_var()
         raw = buf.pull_bytes(length)
-        if tp_id in (TP_ORIGINAL_DCID, TP_INITIAL_SCID):
+        if tp_id in (TP_ORIGINAL_DCID, TP_INITIAL_SCID, TP_STATELESS_RESET_TOKEN):
             out[tp_id] = raw
         else:
             try:
@@ -178,6 +179,11 @@ class QUICConnection:
         self.local_max_datagram_frame_size = DEFAULT_MAX_DATAGRAM_FRAME_SIZE
         self.peer_max_datagram_frame_size = 0
         self.datagrams_pending: list[bytes] = []
+
+        # Stateless reset (RFC 9000 §10.3). Only a server advertises a token (in
+        # transport parameters); the peer stores it to recognise a reset.
+        self.stateless_reset_token = b""
+        self.peer_stateless_reset_token = b""
         self.suite = suite_for(INITIAL_CIPHER)
 
         self.remote_cid_set = not is_client
@@ -229,10 +235,12 @@ class QUICConnection:
 
         remote_cid = hdr.source_cid
         local_cid = os.urandom(8)
+        reset_token = os.urandom(16)
 
         tp = {
             TP_ORIGINAL_DCID: original_dcid,
             TP_INITIAL_SCID: local_cid,
+            TP_STATELESS_RESET_TOKEN: reset_token,
             TP_INITIAL_MAX_DATA: DEFAULT_MAX_DATA,
             TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL: DEFAULT_MAX_STREAM_DATA,
             TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE: DEFAULT_MAX_STREAM_DATA,
@@ -250,7 +258,9 @@ class QUICConnection:
 
         tls = tls_factory(encode_transport_parameters(tp))
 
-        return cls(is_client=False, tls=tls, original_dcid=original_dcid, local_cid=local_cid, remote_cid=remote_cid)
+        conn = cls(is_client=False, tls=tls, original_dcid=original_dcid, local_cid=local_cid, remote_cid=remote_cid)
+        conn.stateless_reset_token = reset_token
+        return conn
 
     def get_next_available_stream_id(self, is_bidi: bool = True) -> int:
         if is_bidi:
@@ -358,6 +368,10 @@ class QUICConnection:
             self.peer_max_data = int(self.peer_transport_params.get(TP_INITIAL_MAX_DATA, DEFAULT_MAX_DATA) or 0)
             self.peer_max_idle = int(self.peer_transport_params.get(TP_MAX_IDLE_TIMEOUT, 0) or 0)
             self.peer_max_datagram_frame_size = int(self.peer_transport_params.get(TP_MAX_DATAGRAM_FRAME_SIZE, 0) or 0)
+
+            peer_token = self.peer_transport_params.get(TP_STATELESS_RESET_TOKEN)
+            if isinstance(peer_token, (bytes, bytearray)) and len(peer_token) == 16:
+                self.peer_stateless_reset_token = bytes(peer_token)
             self.max_bidi_streams = int(self.peer_transport_params.get(TP_INITIAL_MAX_STREAMS_BIDI, DEFAULT_MAX_STREAMS) or DEFAULT_MAX_STREAMS)
             self.max_uni_streams = int(self.peer_transport_params.get(TP_INITIAL_MAX_STREAMS_UNI, DEFAULT_MAX_STREAMS) or DEFAULT_MAX_STREAMS)
             for stream in self.streams.values():
@@ -469,17 +483,28 @@ class QUICConnection:
         dcid_start = offset + 1
         dcid_end = dcid_start + len(self.local_cid)
         if len(data) < dcid_end or data[dcid_start:dcid_end] != self.local_cid:
+            self._maybe_stateless_reset(data)
             return len(data) - offset
 
         pn_offset = offset + 1 + len(self.local_cid)
         plaintext, pn = self.decrypt(data, offset, pn_offset, keys, level, long_header=False, packet_end=len(data))
 
         if plaintext is None:
+            self._maybe_stateless_reset(data)
             return len(data) - offset
 
         self.process_frames(plaintext, level, pn, now)
 
         return len(data) - offset
+
+    def _maybe_stateless_reset(self, data: bytes):
+        # RFC 9000 §10.3: a packet that cannot be associated with a connection
+        # may be a Stateless Reset, identified by its trailing 16-byte token.
+        if self.terminated:
+            return
+        if self.peer_stateless_reset_token and len(data) >= 21 and data[-16:] == self.peer_stateless_reset_token:
+            self.terminated = True
+            self._events.append(ConnectionTerminated(0, "stateless reset"))
 
     def decrypt(self, data: bytes, offset: int, pn_offset: int, keys: PacketKeys, level: int, *, long_header: bool, packet_end: int):
         buf = bytearray(data[offset:packet_end])
