@@ -232,7 +232,7 @@ class TestH1ResponseHasNoBody:
         (101, "GET", True),
         (200, "GET", False),
         (201, "POST", False),
-        (205, "GET", False),
+        (205, "GET", True),
         (301, "GET", False),
         (200, "head", True),
     ])

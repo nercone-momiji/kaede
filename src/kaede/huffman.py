@@ -118,7 +118,7 @@ def huffman_decode(data: bytes) -> bytes:
 
         if sym is not None:
             if sym == 256:
-                break
+                raise RuntimeError("EOS symbol in Huffman-encoded string is a decoding error (RFC 7541 §5.2)")
 
             out.append(sym)
 

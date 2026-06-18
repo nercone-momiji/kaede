@@ -71,7 +71,7 @@ class H3:
     def encode_settings() -> bytes:
         body = bytearray()
 
-        for ident, value in ((SETTINGS_QPACK_MAX_TABLE_CAPACITY, 0), (SETTINGS_QPACK_BLOCKED_STREAMS, 0), (SETTINGS_ENABLE_CONNECT_PROTOCOL, 1)):
+        for ident, value in ((SETTINGS_QPACK_MAX_TABLE_CAPACITY, 0), (SETTINGS_QPACK_BLOCKED_STREAMS, 0)):
             body += encode_uint_var(ident)
             body += encode_uint_var(value)
 
@@ -134,6 +134,7 @@ class H3Connection:
         self.client = peername(addr) if addr is not None else (ipaddress.IPv4Address("0.0.0.0"), 0)
         self.tls = None
         self.assemblers: dict[int, RequestAssembler] = {}
+        self.last_processed_stream_id: int = -1
 
         # client state
         self.streams: dict[int, StreamState] = {}
@@ -252,7 +253,12 @@ class H3Connection:
             elif frame_type == FRAME_DATA:
                 out.append(DataReceived(sid, payload, stream_ended=False))
 
-            elif frame_type in (0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xD):
+            elif frame_type == FRAME_PUSH_PROMISE:
+                if not self.is_client:
+                    self.quic.close(0x0105, "H3_FRAME_UNEXPECTED")
+                    return
+
+            elif frame_type in (FRAME_CANCEL_PUSH, FRAME_SETTINGS, FRAME_GOAWAY, FRAME_MAX_PUSH_ID):
                 self.quic.close(0x0105, "H3_FRAME_UNEXPECTED")
                 return
 
@@ -364,6 +370,7 @@ class H3Connection:
             self.flush()
             return
 
+        self.last_processed_stream_id = max(self.last_processed_stream_id, stream_id)
         self.handler.create_task(self.respond(request))
 
     def build_request(self, stream_id: int, asm: RequestAssembler) -> Request | None:
@@ -563,7 +570,8 @@ class H3Connection:
 
         if self.control_stream_id is not None:
             try:
-                goaway_payload = encode_uint_var(0)
+                goaway_id = max(0, self.last_processed_stream_id)
+                goaway_payload = encode_uint_var(goaway_id)
                 self.quic.send_stream_data(self.control_stream_id, H3.encode_frame(FRAME_GOAWAY, goaway_payload), end_stream=False)
                 self.flush()
             except Exception:

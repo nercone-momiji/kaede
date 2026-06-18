@@ -269,16 +269,19 @@ class WebSocket:
             if not self.closed:
                 self.closed = True
 
-                if len(frame.payload) >= 2:
+                if len(frame.payload) == 1:
+                    self.write(build_frame(Opcode.CLOSE, struct.pack(">H", 1002), mask=self.mask_frames))
+
+                elif len(frame.payload) >= 2:
                     code = struct.unpack(">H", frame.payload[:2])[0]
                     if 1000 <= code <= 1003 or 1007 <= code <= 1011 or 3000 <= code <= 4999:
                         echo = frame.payload[:2]
                     else:
                         echo = b""
-                else:
-                    echo = b""
+                    self.write(build_frame(Opcode.CLOSE, echo, mask=self.mask_frames))
 
-                self.write(build_frame(Opcode.CLOSE, echo, mask=self.mask_frames))
+                else:
+                    self.write(build_frame(Opcode.CLOSE, b"", mask=self.mask_frames))
 
             try:
                 self.transport.close()

@@ -135,6 +135,7 @@ class H2Connection:
         # client response demux
         self.streams: dict[int, StreamState] = {}
         self.settings: asyncio.Event = asyncio.Event()
+        self.peer_enable_connect: bool = False
 
         # server keepalive
         self.inflight: int = 0
@@ -603,6 +604,9 @@ class H2Connection:
                 self.discard_send(event.stream_id)
 
             elif isinstance(event, h2.events.RemoteSettingsChanged):
+                if SettingCodes.ENABLE_CONNECT_PROTOCOL in event.changed_settings:
+                    if event.changed_settings[SettingCodes.ENABLE_CONNECT_PROTOCOL].new_value == 1:
+                        self.peer_enable_connect = True
                 out_events.append(("settings", 0))
 
             elif isinstance(event, h2.events.WindowUpdated):
@@ -876,6 +880,9 @@ class H2Connection:
             raise ConnectionError("connection is not available")
 
         await asyncio.wait_for(self.settings.wait(), self.config.read_timeout)
+
+        if not self.peer_enable_connect:
+            raise ConnectionError("server did not advertise SETTINGS_ENABLE_CONNECT_PROTOCOL=1; cannot use WebSocket over HTTP/2")
 
         stream_id, out = self.send_connect_websocket(request, self.authority, subprotocols)
         state = StreamState(asyncio.get_running_loop(), self.config.max_body_size)

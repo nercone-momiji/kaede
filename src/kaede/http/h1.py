@@ -4,6 +4,7 @@ import os
 import asyncio
 import traceback
 import ipaddress
+import email.utils
 from http import HTTPStatus
 from typing import Literal
 
@@ -20,6 +21,12 @@ TCHAR = frozenset(
     + bytes(range(0x41, 0x5B))   # A-Z
     + bytes(range(0x61, 0x7B))   # a-z
 )
+
+class HTTPVersionNotSupportedError(ValueError):
+    pass
+
+class MethodNotImplementedError(ValueError):
+    pass
 
 class H1:
     @staticmethod
@@ -38,7 +45,7 @@ class H1:
             raise ValueError("malformed HTTP/1.1 request line")
 
         if version_b != b"HTTP/1.1":
-            raise ValueError(f"unsupported HTTP version: {version_b!r}")
+            raise HTTPVersionNotSupportedError(f"unsupported HTTP version: {version_b!r}")
 
         headers = Headers({})
         for line in lines[1:]:
@@ -97,7 +104,7 @@ class H1:
 
         method = method_b.decode("ascii")
         if method not in ("GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"):
-            raise ValueError(f"unknown HTTP method: {method!r}")
+            raise MethodNotImplementedError(f"unknown HTTP method: {method!r}")
 
         target = target_b.decode("latin-1")
         if "\x00" in target or "\r" in target or "\n" in target:
@@ -150,7 +157,7 @@ class H1:
 
     @staticmethod
     def response_has_no_body(status_code: int, method: str) -> bool:
-        return method.upper() == "HEAD" or 100 <= status_code < 200 or status_code in (204, 304)
+        return method.upper() == "HEAD" or 100 <= status_code < 200 or status_code in (204, 205, 304)
 
     @staticmethod
     def parse_response_head(head: bytes) -> tuple[int, str, Headers]:
@@ -514,6 +521,14 @@ class H1Connection:
 
             try:
                 request = H1.parse_request(bytes(self.buffer[:consumed]), client=self.client, scheme="https" if self.secure else "http", secure=self.secure, tls=self.tls, max_body_size=self.config.max_body_size)
+            except HTTPVersionNotSupportedError:
+                self.send_error(505, "HTTP Version Not Supported")
+                self.transport.close()
+                return
+            except MethodNotImplementedError:
+                self.send_error(501, "Not Implemented")
+                self.transport.close()
+                return
             except (ValueError, UnicodeDecodeError):
                 self.send_error(400, "Bad Request")
                 self.transport.close()
@@ -550,11 +565,13 @@ class H1Connection:
     def send_continue(self, expect_continue: bool):
         if expect_continue and not self.continue_sent and self.transport is not None and not self.transport.is_closing():
             self.continue_sent = True
-            self.transport.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+            date = email.utils.formatdate(usegmt=True)
+            self.transport.write(f"HTTP/1.1 100 Continue\r\nDate: {date}\r\n\r\n".encode("latin-1"))
 
     def send_error(self, status: int, phrase: str):
         if self.transport is not None and not self.transport.is_closing():
-            self.transport.write(f"HTTP/1.1 {status} {phrase}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".encode("latin-1"))
+            date = email.utils.formatdate(usegmt=True)
+            self.transport.write(f"HTTP/1.1 {status} {phrase}\r\nConnection: close\r\nContent-Length: 0\r\nDate: {date}\r\n\r\n".encode("latin-1"))
 
     async def run_websocket(self, request: Request, ws: WebSocket):
         self.handler.active_websockets.add(ws)
@@ -589,6 +606,9 @@ class H1Connection:
         if self.handler.shutdown:
             response.headers.set("Connection", "close")
             self.keep_alive = False
+
+        if not self.keep_alive:
+            response.headers.set("Connection", "close", override=False)
 
         if "h3" in self.config.protocols and self.config.bind_quic:
             try:
@@ -790,7 +810,7 @@ class H1Connection:
                 if transfer_encoding:
                     te_tokens = [t.strip() for t in transfer_encoding.split(",") if t.strip()]
 
-                    if te_tokens[-1:] != ["chunked"]:
+                    if te_tokens[-1:] != ["chunked"] or te_tokens.count("chunked") != 1:
                         self.fail_request(ValueError("invalid Transfer-Encoding"))
                         return
 

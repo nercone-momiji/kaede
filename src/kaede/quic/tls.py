@@ -64,6 +64,8 @@ class QuicTLS:
         self.keepalive = list(keepalive)
         self.is_client = is_client
         self.server_name = server_name
+        self.verify_hostname = verify_hostname
+        self.sni: bytes | None = None
 
         self.secrets: dict[tuple[int, int], bytes] = {}
         self.peer_transport_params: bytes = b""
@@ -229,6 +231,42 @@ class QuicTLS:
             if ret > 0:
                 continue
             break
+
+    def reset_for_retry(self):
+        ssl = self.lib.ssl
+        if self.SSL:
+            ssl.SSL_free(self.SSL)
+            self.SSL = None
+
+        self.SSL = ssl.SSL_new(self.ctx)
+        if not self.SSL:
+            raise TLSError("SSL_new failed during Retry reset")
+
+        self.install_callbacks()
+
+        if self.tp_buf is not None:
+            tp_ptr = ctypes.cast(self.tp_buf, VOID_P)
+            if ssl.SSL_set_quic_tls_transport_params(self.SSL, tp_ptr, len(self.tp_buf)) != 1:
+                raise TLSError("SSL_set_quic_tls_transport_params failed during Retry reset")
+
+        ssl.SSL_set_connect_state(self.SSL)
+        if self.sni:
+            ssl.SSL_ctrl(self.SSL, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name,
+                         ctypes.cast(ctypes.c_char_p(self.sni), VOID_P))
+            if self.verify_hostname:
+                ssl.SSL_set1_host(self.SSL, self.sni)
+
+        self.secrets = {}
+        self.peer_transport_params = b""
+        self.handshake_complete = False
+        self.alert = None
+        self.read_level = LEVEL_INITIAL
+        self.write_level = LEVEL_INITIAL
+        self.recv = {LEVEL_INITIAL: bytearray(), LEVEL_EARLY: bytearray(), LEVEL_HANDSHAKE: bytearray(), LEVEL_APPLICATION: bytearray()}
+        self.outgoing = []
+        self.inflight = None
+        self.inflight_level = None
+        self.callback_error = None
 
     def check_callback_error(self):
         if self.callback_error is not None:

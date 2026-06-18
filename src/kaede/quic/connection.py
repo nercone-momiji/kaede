@@ -8,7 +8,7 @@ from . import packet
 from .packet import Buffer, encode_uint_var
 from .crypto import LEVEL_INITIAL, LEVEL_HANDSHAKE, LEVEL_APPLICATION,PacketKeys, suite_for, initial_keys, INITIAL_CIPHER
 from .stream import Stream, StreamSender, StreamReceiver, stream_is_bidirectional, stream_is_client_initiated
-from .recovery import Recovery, SentPacket, level_to_space, SPACE_INITIAL, SPACE_HANDSHAKE, SPACE_APPLICATION
+from .recovery import Recovery, SentPacket, Space, level_to_space, SPACE_INITIAL, SPACE_HANDSHAKE, SPACE_APPLICATION
 from .tls import QuicTLS
 
 MAX_DATAGRAM_SIZE = 1350
@@ -139,6 +139,13 @@ class QUICConnection:
         self.needs_advance = True
         self.buffered_packets: list[bytes] = []
 
+        self.local_bidi_limit = DEFAULT_MAX_STREAMS
+        self.local_uni_limit = DEFAULT_MAX_STREAMS
+
+        self.retry_token: bytes = b""
+
+        self._tls_factory = None
+
     @classmethod
     def create_client(cls, tls_factory, server_name: str, local_tp_extra: dict | None = None) -> "QUICConnection":
         local_cid = os.urandom(8)
@@ -161,7 +168,9 @@ class QUICConnection:
 
         tls = tls_factory(encode_transport_parameters(tp))
 
-        return cls(is_client=True, tls=tls, original_dcid=original_dcid, local_cid=local_cid, remote_cid=original_dcid)
+        conn = cls(is_client=True, tls=tls, original_dcid=original_dcid, local_cid=local_cid, remote_cid=original_dcid)
+        conn._tls_factory = tls_factory
+        return conn
 
     @classmethod
     def create_server(cls, first_datagram: bytes, tls_factory, local_tp_extra: dict | None = None) -> "QUICConnection":
@@ -267,6 +276,13 @@ class QUICConnection:
 
         if self.tls.peer_transport_params and not self.peer_transport_params:
             self.peer_transport_params = decode_transport_parameters(self.tls.peer_transport_params)
+
+            if self.is_client:
+                peer_odcid = self.peer_transport_params.get(TP_ORIGINAL_DCID)
+                if not isinstance(peer_odcid, bytes) or peer_odcid != self.original_dcid:
+                    self.close(0x10, "original_destination_connection_id mismatch", application=False)
+                    return
+
             self.peer_max_data = int(self.peer_transport_params.get(TP_INITIAL_MAX_DATA, DEFAULT_MAX_DATA) or 0)
             self.max_bidi_streams = int(self.peer_transport_params.get(TP_INITIAL_MAX_STREAMS_BIDI, DEFAULT_MAX_STREAMS) or DEFAULT_MAX_STREAMS)
             self.max_uni_streams = int(self.peer_transport_params.get(TP_INITIAL_MAX_STREAMS_UNI, DEFAULT_MAX_STREAMS) or DEFAULT_MAX_STREAMS)
@@ -297,7 +313,9 @@ class QUICConnection:
 
             if not (first & packet.PACKET_FIXED_BIT):
                 if first & packet.PACKET_LONG_HEADER:
-                    self.close(0x0a, "Fixed bit violation", application=False)
+                    if self.is_client and not self.handshake_complete:
+                        self.terminated = True
+                        self._events.append(ConnectionTerminated(0x0, "received Version Negotiation packet before handshake"))
                     return
                 break
 
@@ -332,9 +350,14 @@ class QUICConnection:
         hdr = packet.parse_long_header(data, offset)
 
         if hdr.version != packet.QUIC_VERSION_1:
+            if hdr.version == 0 and self.is_client and not self.handshake_complete:
+                self.terminated = True
+                self._events.append(ConnectionTerminated(0x0, "server does not support QUIC version 1"))
             return 0
 
         if hdr.packet_type == packet.PACKET_TYPE_RETRY:
+            if self.is_client and not self.handshake_complete and self._tls_factory is not None:
+                self.handle_retry(hdr)
             return len(data) - offset
 
         level = packet.level_for_long_type(hdr.packet_type)
@@ -503,14 +526,18 @@ class QUICConnection:
                     self.max_uni_streams = max(self.max_uni_streams or 0, f.maximum)
 
             elif ftype is frames.NewConnectionId:
-                pass
+                if f.retire_prior_to > 0:
+                    self.remote_cid = f.connection_id
+                    self.remote_cid_set = True
 
             elif ftype is frames.RetireConnectionId:
-                pass
+                if f.sequence_number > 0:
+                    self.close(0x0a, "RETIRE_CONNECTION_ID references unissued sequence number", application=False)
+                    return
 
             elif ftype is frames.HandshakeDone:
                 if level != LEVEL_APPLICATION:
-                    self.close(0x0a, "HANDSHAKE_DONE received at wrong encryption level")
+                    self.close(0x0a, "HANDSHAKE_DONE received at wrong encryption level", application=False)
                     return
 
                 self.handshake_confirmed = True
@@ -527,6 +554,15 @@ class QUICConnection:
             self.recv_keys.pop(LEVEL_INITIAL, None)
 
     def on_stream_frame(self, f: frames.Stream):
+        if f.stream_id not in self.streams:
+            peer_initiated = stream_is_client_initiated(f.stream_id) != self.is_client
+            if peer_initiated:
+                stream_num = f.stream_id >> 2
+                limit = self.local_bidi_limit if stream_is_bidirectional(f.stream_id) else self.local_uni_limit
+                if stream_num >= limit:
+                    self.close(0x04, "STREAM_LIMIT_ERROR: stream ID exceeds local limit", application=False)
+                    return
+
         stream = self.ensure_stream(f.stream_id)
         stream.receiver.receive(f.offset, f.data, f.fin)
 
@@ -548,6 +584,38 @@ class QUICConnection:
                     st = self.streams.get(sid)
                     if st is not None:
                         st.sender.on_loss(off, length, fin)
+
+    def handle_retry(self, hdr) -> None:
+        self.retry_token = hdr.token
+
+        if not hdr.source_cid:
+            return
+
+        new_dcid = hdr.source_cid
+        ck, sk = initial_keys(new_dcid)
+        self.send_keys[LEVEL_INITIAL] = ck
+        self.recv_keys[LEVEL_INITIAL] = sk
+        self.remote_cid = new_dcid
+        self.remote_cid_set = True
+
+        initial_space = self.recovery.spaces[SPACE_INITIAL]
+        for pkt in initial_space.sent.values():
+            if pkt.in_flight:
+                self.recovery.bytes_in_flight = max(0, self.recovery.bytes_in_flight - pkt.sent_bytes)
+        self.recovery.spaces[SPACE_INITIAL] = Space()
+
+        self.next_pn[SPACE_INITIAL] = 0
+        self.recv_pns[SPACE_INITIAL] = set()
+        self.ack_needed[SPACE_INITIAL] = False
+        self.crypto_send[LEVEL_INITIAL] = StreamSender()
+        self.crypto_recv[LEVEL_INITIAL] = StreamReceiver()
+
+        try:
+            self.tls.reset_for_retry()
+        except Exception:
+            pass
+
+        self.needs_advance = True
 
     def datagrams_to_send(self, now: float) -> list[tuple[bytes, int]]:
         if self.terminated and self.close_sent:
@@ -622,8 +690,13 @@ class QUICConnection:
             payload += ack.encode()
             self.ack_needed[space] = False
 
-        if self.close_pending is not None and level == LEVEL_APPLICATION:
-            payload += self.close_pending.encode()
+        if self.close_pending is not None:
+            close_frame = self.close_pending
+
+            if level != LEVEL_APPLICATION and close_frame.application:
+                close_frame = frames.ConnectionClose(0, 0, b"", application=False)
+
+            payload += close_frame.encode()
             self.terminated = True
             self.close_sent = True
 
@@ -700,7 +773,8 @@ class QUICConnection:
             prefix, first = packet.serialize_short_header_prefix(self.remote_cid, pn_len)
         else:
             ptype = {LEVEL_INITIAL: packet.PACKET_TYPE_INITIAL, LEVEL_HANDSHAKE: packet.PACKET_TYPE_HANDSHAKE}[level]
-            prefix, first = packet.serialize_long_header_prefix(ptype, packet.QUIC_VERSION_1, self.remote_cid, self.local_cid, b"", pn_len, payload_len)
+            token = self.retry_token if level == LEVEL_INITIAL else b""
+            prefix, first = packet.serialize_long_header_prefix(ptype, packet.QUIC_VERSION_1, self.remote_cid, self.local_cid, token, pn_len, payload_len)
 
         header = prefix + pn_bytes
         ciphertext = keys.encrypt(pn, header, payload)
