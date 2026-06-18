@@ -22,6 +22,19 @@ TCHAR = frozenset(
     + bytes(range(0x61, 0x7B))   # a-z
 )
 
+HEXDIG = frozenset(b"0123456789abcdefABCDEF")
+
+def clean_field_value(value_b: bytes) -> str:
+    # RFC 9110 §5.5: strip OWS (SP/HTAB) only, then reject CR/LF/NUL and other
+    # controls. field-vchar = VCHAR / obs-text, so HTAB, SP, %x21-7E and
+    # %x80-FF are permitted; everything else (including NUL) must be rejected.
+    value = value_b.strip(b" \t")
+    for c in value:
+        if c == 0x09 or 0x20 <= c <= 0x7E or c >= 0x80:
+            continue
+        raise ValueError("invalid control character in header field value")
+    return value.decode("latin-1")
+
 class HTTPVersionNotSupportedError(ValueError):
     pass
 
@@ -66,7 +79,7 @@ class H1:
             if not name_b or not all(c in TCHAR for c in name_b):
                 raise ValueError(f"invalid character in header field name: {name_b!r}")
 
-            headers.append(name_b.decode("latin-1"), value_b.decode("latin-1").strip())
+            headers.append(name_b.decode("latin-1"), clean_field_value(value_b))
 
         host_values = headers.headers.get("host", [])
         if not host_values:
@@ -213,7 +226,7 @@ class H1:
             if not name_b or not all(c in TCHAR for c in name_b):
                 raise ValueError(f"invalid character in header field name: {name_b!r}")
 
-            headers.append(name_b.decode("latin-1"), value_b.decode("latin-1").strip())
+            headers.append(name_b.decode("latin-1"), clean_field_value(value_b))
 
         return status, phrase, headers
 
@@ -273,15 +286,17 @@ class H1:
             if end == -1:
                 return None
 
+            # RFC 9112 §7.1.1: chunk-size = 1*HEXDIG, optionally followed by
+            # chunk-ext (";..."). BWS is permitted only around the ";", so trim
+            # trailing OWS but require the remainder to be strictly hexadecimal;
+            # this rejects smuggling forms like "0x1a", "1_a", "+a" and leading
+            # whitespace that Python's int(_, 16) would otherwise accept.
             size_line = data[i:end].split(b";", 1)[0].rstrip(b" \t")
 
-            try:
-                size = int(size_line, 16)
-            except ValueError:
+            if not size_line or any(c not in HEXDIG for c in size_line):
                 raise ValueError(f"invalid chunk size: {size_line!r}")
 
-            if size < 0:
-                raise ValueError(f"negative chunk size: {size}")
+            size = int(size_line, 16)
 
             if max_body_size is not None and len(body) + size > max_body_size:
                 raise ValueError("chunked body exceeds max_body_size")

@@ -9,73 +9,221 @@ import email.utils
 
 from typing import TYPE_CHECKING, Awaitable
 
-from .models import Request, Response, Callback
+from .models import Request, Response, Headers, Callback
+from .http.fields import parse_qlist, split_list, etag_strong_match, etag_weak_match
+from .http.date import parse_http_date
 
 if TYPE_CHECKING:
     from .api.client import Config as ClientConfig
     from .api.server import Config as ServerConfig
 
+# Header fields preserved on a 304 (Not Modified) response (RFC 7232 §4.1).
+_NOT_MODIFIED_HEADERS = frozenset({
+    "cache-control", "content-location", "date", "etag", "expires", "vary", "last-modified", "server",
+})
+
+def _if_match_passes(field_value: str, etag: str) -> bool:
+    # RFC 7232 §3.1: strong comparison; "*" is true iff a representation exists.
+    value = field_value.strip()
+    if value == "*":
+        return True
+    if not etag:
+        return False
+    return any(etag_strong_match(tag, etag) for tag in split_list(value))
+
+def _if_none_match_matches(field_value: str, etag: str) -> bool:
+    # RFC 7232 §3.2: weak comparison; returns True when the precondition is
+    # *false* (i.e. a tag matches). "*" matches iff a representation exists.
+    value = field_value.strip()
+    if value == "*":
+        return True
+    if not etag:
+        return False
+    return any(etag_weak_match(tag, etag) for tag in split_list(value))
+
+def _not_modified(response: Response) -> Response:
+    filtered = Headers({})
+    for key, values in response.headers.headers.items():
+        if key in _NOT_MODIFIED_HEADERS:
+            for value in values:
+                filtered.append(key, value)
+
+    response.headers = filtered
+    response.status_code = 304
+    response.body = None
+    response.compressed = None
+    return response
+
+def _precondition_failed(response: Response) -> Response:
+    for header in ("Content-Type", "Content-Encoding", "Transfer-Encoding", "Content-Range", "Accept-Ranges"):
+        response.headers.remove(header)
+    response.status_code = 412
+    response.body = None
+    response.compressed = None
+    response.headers.set("Content-Length", "0")
+    return response
+
+def evaluate_preconditions(request: Request, response: Response) -> Response | None:
+    """Evaluate conditional request preconditions in the RFC 7232 §6 / RFC 9110
+    §13.2.2 precedence order, returning a 304 or 412 response when a
+    precondition fails, or None to proceed.
+
+    Only GET and HEAD are evaluated here: for those the representation already
+    produced by the callback is simply not transmitted, which is side-effect
+    free. Preconditions on unsafe methods (PUT/DELETE/PATCH/...) must be
+    evaluated by the application before it performs the change, since Kaede
+    cannot undo a side effect the callback already applied."""
+    if request.method not in ("GET", "HEAD"):
+        return None
+    # RFC 9110 §13.1.1: ignore preconditions unless the response would be 2xx.
+    if response.status_code != 200:
+        return None
+
+    etag = (response.headers.get("ETag") or "").strip()
+    last_modified_raw = (response.headers.get("Last-Modified") or "").strip()
+    last_modified = parse_http_date(last_modified_raw) if last_modified_raw else None
+
+    if_match = request.headers.get("If-Match")
+    if_unmodified_since = request.headers.get("If-Unmodified-Since")
+    if_none_match = request.headers.get("If-None-Match")
+    if_modified_since = request.headers.get("If-Modified-Since")
+
+    # Step 1 / Step 2: If-Match takes precedence over If-Unmodified-Since.
+    if if_match is not None:
+        if not _if_match_passes(if_match, etag):
+            return _precondition_failed(response)
+    elif if_unmodified_since is not None:
+        when = parse_http_date(if_unmodified_since)  # ignored if not a valid HTTP-date
+        if when is not None and last_modified is not None and last_modified > when:
+            return _precondition_failed(response)
+
+    # Step 3: If-None-Match.
+    if if_none_match is not None:
+        if _if_none_match_matches(if_none_match, etag):
+            return _not_modified(response)
+        return None
+
+    # Step 4: If-Modified-Since (only when If-None-Match is absent).
+    if if_modified_since is not None:
+        when = parse_http_date(if_modified_since)
+        if when is not None and last_modified is not None and last_modified <= when:
+            return _not_modified(response)
+
+    return None
+
 def parse_accept_encoding(accept_encoding: str) -> dict[str, float]:
+    # RFC 9110 §12.5.3. Uses the shared quoted-string-aware list parser; when a
+    # coding appears more than once the last weight wins.
     result: dict[str, float] = {}
-    if not accept_encoding:
-        return result
-
-    for item in accept_encoding.split(","):
-        token, _, params = item.strip().partition(";")
-        token = token.strip().lower()
-        if not token:
-            continue
-
-        q = 1.0
-        for param in params.split(";"):
-            param = param.strip()
-            if param.startswith("q="):
-                try:
-                    q = max(0.0, min(1.0, float(param[2:])))
-                except ValueError:
-                    q = 0.0
-                break
-
+    for token, q, _ in parse_qlist(accept_encoding or ""):
         result[token] = q
-
     return result
 
-def parse_range(value: str, total: int) -> tuple[int, int] | None:
-    if not value.startswith("bytes="):
-        return None
-    spec = value[6:].split(",")[0].strip()
-
+def _parse_one_range(spec: str, total: int) -> tuple[int, int] | str:
+    # Returns (start, end) inclusive for a satisfiable spec, "unsatisfiable" for
+    # a syntactically valid but unsatisfiable spec, or "invalid" for a
+    # malformed spec (RFC 7233 §2.1).
     if spec.startswith("-"):
-        try:
-            suffix = int(spec[1:])
-        except ValueError:
-            return None
-        if suffix <= 0 or total == 0:
-            return None
+        if not spec[1:].isdigit():
+            return "invalid"
+        suffix = int(spec[1:])
+        if suffix == 0 or total == 0:
+            return "unsatisfiable"
         return (max(0, total - suffix), total - 1)
 
     dash = spec.find("-")
     if dash == -1:
-        return None
+        return "invalid"
 
     start_s, end_s = spec[:dash].strip(), spec[dash + 1:].strip()
-    try:
-        start = int(start_s)
-    except ValueError:
-        return None
+    if not start_s.isdigit():
+        return "invalid"
+    start = int(start_s)
 
-    try:
-        end = int(end_s) if end_s else total - 1
-    except ValueError:
-        return None
+    if end_s:
+        if not end_s.isdigit():
+            return "invalid"
+        end = int(end_s)
+        if end < start:
+            return "invalid"
+    else:
+        end = total - 1
 
+    if start >= total:
+        return "unsatisfiable"
     if end >= total:
         end = total - 1
 
-    if start > end or start >= total:
+    return (start, end)
+
+def parse_ranges(value: str, total: int) -> list[tuple[int, int]] | None:
+    """Parse a byte-range-set (RFC 7233 §2.1). Returns the list of satisfiable
+    (start, end) ranges (possibly empty when the set is valid but wholly
+    unsatisfiable -> 416), or None when the header should be ignored (unknown
+    unit or malformed -> serve a normal 200)."""
+    if not value.startswith("bytes="):
         return None
 
-    return (start, end)
+    ranges: list[tuple[int, int]] = []
+    saw_spec = False
+
+    for spec in value[6:].split(","):
+        spec = spec.strip()
+        if not spec:
+            continue
+        saw_spec = True
+        parsed = _parse_one_range(spec, total)
+        if parsed == "invalid":
+            return None
+        if parsed == "unsatisfiable":
+            continue
+        ranges.append(parsed)
+
+    if not saw_spec:
+        return None
+    return ranges
+
+def build_multipart_byteranges(parts: list[tuple[int, int, bytes]], total: int, content_type: str) -> tuple[bytes, str]:
+    """Serialize a multipart/byteranges payload (RFC 7233 §4.1, Appendix A).
+    parts is a list of (start, end, data). Returns (body, content_type)."""
+    boundary = os.urandom(16).hex()
+    crlf = b"\r\n"
+    out = bytearray()
+
+    for start, end, data in parts:
+        out += b"--" + boundary.encode("ascii") + crlf
+        out += b"Content-Type: " + content_type.encode("latin-1") + crlf
+        out += f"Content-Range: bytes {start}-{end}/{total}".encode("ascii") + crlf
+        out += crlf
+        out += data + crlf
+
+    out += b"--" + boundary.encode("ascii") + b"--" + crlf
+    return bytes(out), f"multipart/byteranges; boundary={boundary}"
+
+def _effective_range(request: Request, response: Response) -> str:
+    """Return the Range header value to honor, or "" if the Range must be
+    ignored because an If-Range precondition does not match (RFC 7233 §3.2)."""
+    range_header = request.headers.get("Range", "") or ""
+    if not range_header:
+        return ""
+
+    if_range = (request.headers.get("If-Range") or "").strip()
+    if not if_range:
+        return range_header
+
+    etag = (response.headers.get("ETag") or "").strip()
+    last_modified = (response.headers.get("Last-Modified") or "").strip()
+
+    if if_range.startswith("W/"):
+        # A weak validator is never usable in If-Range (RFC 7233 §3.2).
+        return ""
+    if if_range.startswith('"'):
+        return range_header if etag and etag_strong_match(if_range, etag) else ""
+
+    # HTTP-date validator: exact match against Last-Modified, strong only.
+    when = parse_http_date(if_range)
+    lm = parse_http_date(last_modified) if last_modified else None
+    return range_header if (when is not None and lm is not None and when == lm) else ""
 
 def error_response(request: Request, config: ServerConfig) -> Response:
     response = Response(b"Internal Server Error", status_code=500, compression=False, minification=False)
@@ -120,51 +268,48 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
     response.headers.set("Date", email.utils.formatdate(usegmt=True), override=False)
     response.headers.set("Server", config.server_name, override=False)
 
+    conditional = evaluate_preconditions(request, response)
+    if conditional is not None:
+        if request.method == "HEAD":
+            conditional.body = None
+        return conditional
+
     try:
         if response.has_real_body:
             await response.minify(html=config.minify_html, css=config.minify_css, js=config.minify_js, svg=config.minify_svg, keep_html_comments=config.minify_keep_html_comments)
 
-            if response.status_code == 200 and request.method in ("GET", "HEAD"):
+            if response.status_code == 200 and request.method == "GET":
                 response.headers.set("Accept-Ranges", "bytes", override=False)
 
-            range_header = request.headers.get("Range", "")
-            range_is_multi = range_header.startswith("bytes=") and "," in range_header[6:]
+            # RFC 9110 §14.2: range handling is defined for GET only.
+            range_header = _effective_range(request, response) if request.method == "GET" and response.status_code == 200 else ""
 
             if range_header:
-                if_range = request.headers.get("If-Range", "").strip()
-
-                if if_range:
-                    etag = response.headers.get("ETag", "").strip()
-                    last_modified = response.headers.get("Last-Modified", "").strip()
-
-                    if if_range.startswith('"'):
-                        if if_range != etag:
-                            range_header = ""
-
-                    elif if_range.startswith("W/"):
-                        range_header = ""
-
-                    else:
-                        if if_range != last_modified:
-                            range_header = ""
-
-            if (range_header and not range_is_multi and request.method in ("GET", "HEAD") and response.status_code == 200):
                 total = len(response.body)
-                parsed = parse_range(range_header, total)
+                ranges = parse_ranges(range_header, total)
 
-                response.headers.set("Accept-Ranges", "bytes")
-
-                if parsed is None:
+                if ranges is not None and not ranges:
                     response.status_code = 416
                     response.headers.set("Content-Range", f"bytes */{total}")
+                    response.headers.remove("Content-Encoding")
                     response.body = b""
+                    response.headers.set("Content-Type", response.content_type or response.headers.get("Content-Type") or "application/octet-stream")
                     response.headers.set("Content-Length", "0")
                     return response
 
-                start, end = parsed
-                response.body = response.body[start:end + 1]
-                response.status_code = 206
-                response.headers.set("Content-Range", f"bytes {start}-{end}/{total}")
+                if ranges and len(ranges) == 1:
+                    start, end = ranges[0]
+                    response.body = response.body[start:end + 1]
+                    response.status_code = 206
+                    response.headers.set("Content-Range", f"bytes {start}-{end}/{total}")
+
+                elif ranges:
+                    representation_type = response.content_type or response.headers.get("Content-Type") or "application/octet-stream"
+                    body, ctype = build_multipart_byteranges([(s, e, response.body[s:e + 1]) for s, e in ranges], total, representation_type)
+                    response.body = body
+                    response.content_type = ctype
+                    response.headers.remove("Content-Range")
+                    response.status_code = 206
 
             if response.status_code != 206:
                 await response.compress(parse_accept_encoding(request.headers.get("Accept-Encoding", "")))
@@ -195,41 +340,44 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
             response.headers.set("Accept-Ranges", "bytes")
             response.headers.set("Content-Type", response.content_type or response.headers.get("Content-Type") or mime or "application/octet-stream")
 
-            range_header = request.headers.get("Range", "")
-            range_is_multi = range_header.startswith("bytes=") and "," in range_header[6:]
+            # RFC 9110 §14.2: range handling is defined for GET only.
+            range_header = _effective_range(request, response) if request.method == "GET" and response.status_code == 200 else ""
+            ranges = parse_ranges(range_header, total) if range_header else None
 
-            if range_header:
-                if_range = request.headers.get("If-Range", "").strip()
+            if range_header and ranges is not None and not ranges:
+                response.status_code = 416
+                response.headers.set("Content-Range", f"bytes */{total}")
+                response.body = None
+                response.headers.set("Content-Length", "0")
+                return response
 
-                if if_range:
-                    etag = response.headers.get("ETag", "").strip()
-                    last_modified = response.headers.get("Last-Modified", "").strip()
-
-                    if if_range.startswith('"'):
-                        if if_range != etag:
-                            range_header = ""
-
-                    elif if_range.startswith("W/"):
-                        range_header = ""
-
-                    else:
-                        if if_range != last_modified:
-                            range_header = ""
-
-            if (range_header and not range_is_multi and request.method in ("GET", "HEAD") and response.status_code == 200):
-                parsed = parse_range(range_header, total)
-                if parsed is None:
-                    response.status_code = 416
-                    response.headers.set("Content-Range", f"bytes */{total}")
-                    response.body = None
-                    response.headers.set("Content-Length", "0")
-                    return response
-
-                start, end = parsed
+            if ranges and len(ranges) == 1:
+                start, end = ranges[0]
                 response.file_range = (start, end)
                 response.status_code = 206
                 response.headers.set("Content-Range", f"bytes {start}-{end}/{total}")
                 response.headers.set("Content-Length", str(end - start + 1))
+
+            elif ranges:
+                representation_type = response.headers.get("Content-Type") or mime or "application/octet-stream"
+
+                def read_slices(path_str=path, specs=ranges):
+                    chunks: list[bytes] = []
+                    with open(path_str, "rb") as fh:
+                        for s, e in specs:
+                            fh.seek(s)
+                            chunks.append(fh.read(e - s + 1))
+                    return chunks
+
+                slices = await loop.run_in_executor(None, read_slices)
+                body, ctype = build_multipart_byteranges([(ranges[i][0], ranges[i][1], slices[i]) for i in range(len(ranges))], total, representation_type)
+
+                response.body = body
+                response.file_range = None
+                response.content_type = ctype
+                response.headers.set("Content-Type", ctype)
+                response.status_code = 206
+                response.headers.set("Content-Length", str(len(body)))
 
             else:
                 await response.compress(parse_accept_encoding(request.headers.get("Accept-Encoding", "")))

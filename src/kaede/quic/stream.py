@@ -221,3 +221,8 @@ class Stream:
         self.stop_sending_pending: int | None = None
         self.is_bidi = stream_is_bidirectional(stream_id)
         self.data_blocked_sent_at: int | None = None
+
+        # Receive-side flow control: highest byte offset seen, and whether a
+        # MAX_STREAM_DATA frame extending our advertised limit is pending.
+        self.recv_highest_offset = 0
+        self.max_stream_data_pending = False

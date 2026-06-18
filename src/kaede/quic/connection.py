@@ -107,6 +107,15 @@ class QUICConnection:
         self.data_sent: int = 0
 
         self.recovery = Recovery(MAX_DATAGRAM_SIZE)
+
+        # Idle timeout (RFC 9000 §10.1). The effective timeout is the minimum of
+        # both endpoints' advertised values; the timer restarts on a successfully
+        # processed packet and on sending the first ack-eliciting packet since.
+        self.local_max_idle = 30000  # milliseconds; mirrors the advertised value
+        self.peer_max_idle = 0
+        self.idle_base: float | None = None
+        self.ack_eliciting_since_recv = False
+
         self.data_blocked_pending: bool = False
         self.streams_blocked_bidi: bool = False
         self.streams_blocked_uni: bool = False
@@ -114,6 +123,18 @@ class QUICConnection:
 
         self.send_keys: dict[int, PacketKeys] = {}
         self.recv_keys: dict[int, PacketKeys] = {}
+
+        # Key update state (RFC 9001 §6). Send and receive key generations are
+        # tracked independently so updates initiated by either endpoint are
+        # handled; the Key Phase bit transmitted/expected is generation & 1.
+        # *_next hold precomputed next-generation keys; recv_keys_prev retains
+        # the prior generation to decrypt reordered packets.
+        self.send_key_gen = 0
+        self.recv_key_gen = 0
+        self.send_keys_next: PacketKeys | None = None
+        self.recv_keys_next: PacketKeys | None = None
+        self.recv_keys_prev: PacketKeys | None = None
+
         ck, sk = initial_keys(original_dcid)
         if is_client:
             self.send_keys[LEVEL_INITIAL], self.recv_keys[LEVEL_INITIAL] = ck, sk
@@ -126,6 +147,7 @@ class QUICConnection:
         self.next_pn = {SPACE_INITIAL: 0, SPACE_HANDSHAKE: 0, SPACE_APPLICATION: 0}
         self.recv_pns: dict[int, set[int]] = {SPACE_INITIAL: set(), SPACE_HANDSHAKE: set(), SPACE_APPLICATION: set()}
         self.largest_recv: dict[int, int] = {}
+        self.largest_recv_time: dict[int, float] = {}
         self.ack_needed = {SPACE_INITIAL: False, SPACE_HANDSHAKE: False, SPACE_APPLICATION: False}
 
         self.streams: dict[int, Stream] = {}
@@ -136,6 +158,13 @@ class QUICConnection:
         self.max_bidi_streams: int | None = None
         self.max_uni_streams: int | None = None
         self.data_sent = 0
+
+        # Receive-side connection flow control (RFC 9000 §4). max_data_local is
+        # the connection limit we advertise; it is extended via MAX_DATA frames
+        # as the application consumes stream data.
+        self.max_data_local = DEFAULT_MAX_DATA
+        self.data_received = 0
+        self.max_data_pending = False
         self.suite = suite_for(INITIAL_CIPHER)
 
         self.remote_cid_set = not is_client
@@ -275,6 +304,12 @@ class QUICConnection:
                     self.send_keys[level] = PacketKeys(ws, self.suite)
                     self.recv_keys[level] = PacketKeys(rs, self.suite)
 
+                    if level == LEVEL_APPLICATION:
+                        # Precompute the next key generation so a peer-initiated
+                        # key update can be processed immediately (RFC 9001 §6).
+                        self.send_keys_next = self.send_keys[level].next_generation()
+                        self.recv_keys_next = self.recv_keys[level].next_generation()
+
     def run_handshake(self):
         if self.terminated:
             return
@@ -293,6 +328,7 @@ class QUICConnection:
                     return
 
             self.peer_max_data = int(self.peer_transport_params.get(TP_INITIAL_MAX_DATA, DEFAULT_MAX_DATA) or 0)
+            self.peer_max_idle = int(self.peer_transport_params.get(TP_MAX_IDLE_TIMEOUT, 0) or 0)
             self.max_bidi_streams = int(self.peer_transport_params.get(TP_INITIAL_MAX_STREAMS_BIDI, DEFAULT_MAX_STREAMS) or DEFAULT_MAX_STREAMS)
             self.max_uni_streams = int(self.peer_transport_params.get(TP_INITIAL_MAX_STREAMS_UNI, DEFAULT_MAX_STREAMS) or DEFAULT_MAX_STREAMS)
             for stream in self.streams.values():
@@ -448,10 +484,16 @@ class QUICConnection:
 
         header = bytes(buf[:rel_pn + pn_len])
         ciphertext = bytes(buf[rel_pn + pn_len:])
-        try:
-            plaintext = keys.decrypt(pn, header, ciphertext)
-        except Exception:
-            return None, 0
+
+        if long_header:
+            try:
+                plaintext = keys.decrypt(pn, header, ciphertext)
+            except Exception:
+                return None, 0
+        else:
+            plaintext = self._decrypt_application((buf[0] >> 2) & 1, pn, header, ciphertext)
+            if plaintext is None:
+                return None, 0
 
         self.recv_pns[space].add(pn)
 
@@ -466,10 +508,74 @@ class QUICConnection:
 
         return plaintext, pn
 
+    def _decrypt_application(self, key_phase_bit: int, pn: int, header: bytes, ciphertext: bytes) -> bytes | None:
+        current = self.recv_keys.get(LEVEL_APPLICATION)
+        if current is None:
+            return None
+
+        if key_phase_bit == (self.recv_key_gen & 1):
+            try:
+                return current.decrypt(pn, header, ciphertext)
+            except Exception:
+                return None
+
+        # The Key Phase bit differs: either a peer-initiated key update
+        # (next generation) or a reordered packet from the previous generation
+        # (RFC 9001 §6.3, §6.4).
+        if self.recv_keys_next is not None:
+            try:
+                plaintext = self.recv_keys_next.decrypt(pn, header, ciphertext)
+            except Exception:
+                plaintext = None
+            if plaintext is not None:
+                self._advance_recv_keys()
+                if self.send_key_gen < self.recv_key_gen:
+                    self._advance_send_keys()  # RFC 9001 §6.1: respond with updated keys
+                return plaintext
+
+        if self.recv_keys_prev is not None:
+            try:
+                return self.recv_keys_prev.decrypt(pn, header, ciphertext)
+            except Exception:
+                return None
+
+        return None
+
+    def _advance_recv_keys(self):
+        self.recv_keys_prev = self.recv_keys[LEVEL_APPLICATION]
+        self.recv_keys[LEVEL_APPLICATION] = self.recv_keys_next
+        self.recv_keys_next = self.recv_keys[LEVEL_APPLICATION].next_generation()
+        self.recv_key_gen += 1
+
+    def _advance_send_keys(self):
+        self.send_keys[LEVEL_APPLICATION] = self.send_keys_next
+        self.send_keys_next = self.send_keys[LEVEL_APPLICATION].next_generation()
+        self.send_key_gen += 1
+
+    def initiate_key_update(self):
+        # RFC 9001 §6.2: a key update may only be initiated after the handshake
+        # is confirmed; rotate our send keys, and the receive side rotates when
+        # the peer responds with the new Key Phase.
+        if not self.handshake_confirmed or LEVEL_APPLICATION not in self.send_keys or self.send_keys_next is None:
+            return
+        if self.send_key_gen > self.recv_key_gen:
+            return  # a previously initiated update is still outstanding
+        self._advance_send_keys()
+
     def process_frames(self, plaintext: bytes, level: int, pn: int, now: float):
         space = level_to_space(level)
         buf = Buffer(plaintext)
         ack_eliciting = False
+
+        # Record when the largest packet number in this space arrived, so the
+        # ACK Delay field can be reported accurately (RFC 9000 §13.2.5).
+        if pn == self.largest_recv.get(space):
+            self.largest_recv_time[space] = now
+
+        # RFC 9000 §10.1: restart the idle timer on a successfully processed
+        # packet; a subsequent ack-eliciting send may restart it once more.
+        self.idle_base = now
+        self.ack_eliciting_since_recv = False
 
         while not buf.eof():
             f = frames.pull_frame(buf)
@@ -589,6 +695,24 @@ class QUICConnection:
                     return
 
         stream = self.ensure_stream(f.stream_id)
+
+        # RFC 9000 §4.1: enforce the flow control limits we advertised. A peer
+        # that sends data beyond the stream or connection limit is a
+        # FLOW_CONTROL_ERROR.
+        new_end = f.offset + len(f.data)
+        if new_end > stream.recv_highest_offset:
+            if new_end > stream.max_stream_data_local:
+                self.close(0x03, "FLOW_CONTROL_ERROR: stream data beyond advertised limit", application=False)
+                return
+
+            delta = new_end - stream.recv_highest_offset
+            if self.data_received + delta > self.max_data_local:
+                self.close(0x03, "FLOW_CONTROL_ERROR: connection data beyond advertised limit", application=False)
+                return
+
+            self.data_received += delta
+            stream.recv_highest_offset = new_end
+
         stream.receiver.receive(f.offset, f.data, f.fin)
 
         chunk = stream.receiver.pull()
@@ -596,6 +720,24 @@ class QUICConnection:
 
         if chunk or finished:
             self._events.append(StreamDataReceived(f.stream_id, chunk, finished))
+
+        # RFC 9000 §4: replenish flow control credit as data is consumed so the
+        # peer is not stalled at the initial limit.
+        self._extend_stream_credit(stream)
+        self._extend_connection_credit()
+
+    def _extend_stream_credit(self, stream: Stream):
+        window = DEFAULT_MAX_STREAM_DATA
+        if stream.max_stream_data_local - stream.receiver.consumed < window // 2:
+            stream.max_stream_data_local = stream.receiver.consumed + window
+            stream.max_stream_data_pending = True
+
+    def _extend_connection_credit(self):
+        window = DEFAULT_MAX_DATA
+        total_consumed = sum(s.receiver.consumed for s in self.streams.values())
+        if self.max_data_local - total_consumed < window // 2:
+            self.max_data_local = total_consumed + window
+            self.max_data_pending = True
 
     def on_lost(self, lost: list[SentPacket]):
         for pkt in lost:
@@ -609,6 +751,12 @@ class QUICConnection:
                     st = self.streams.get(sid)
                     if st is not None:
                         st.sender.on_loss(off, length, fin)
+                elif kind == "max_data":
+                    self.max_data_pending = True
+                elif kind == "max_stream_data":
+                    st = self.streams.get(item[1])
+                    if st is not None:
+                        st.max_stream_data_pending = True
 
     def handle_retry(self, hdr, data: bytes, offset: int) -> None:
         pn_offset = hdr.pn_offset
@@ -653,7 +801,10 @@ class QUICConnection:
         self.needs_advance = True
 
     def datagrams_to_send(self, now: float) -> list[tuple[bytes, int]]:
-        if self.terminated and self.close_sent:
+        # Once terminated, only an endpoint that initiated the close still has a
+        # CONNECTION_CLOSE to emit. In the draining state (peer-initiated close)
+        # or after an idle timeout, an endpoint MUST NOT send (RFC 9000 §10.2).
+        if self.terminated and (self.close_sent or self.close_pending is None):
             return []
         self.run_handshake()
 
@@ -720,7 +871,14 @@ class QUICConnection:
 
         if self.ack_needed[space] and self.recv_pns[space]:
             ranges = frames.ranges_from_set(self.recv_pns[space])
-            ack = frames.Ack(largest=ranges[0][1], delay=0, ranges=ranges)
+
+            # ACK Delay is the time since the largest acked packet arrived,
+            # scaled by our ack_delay_exponent (default 3, as we do not send the
+            # ack_delay_exponent transport parameter). RFC 9000 §13.2.5, §19.3.
+            recv_time = self.largest_recv_time.get(space)
+            delay = max(0, int((now - recv_time) * 1_000_000)) >> 3 if recv_time is not None else 0
+
+            ack = frames.Ack(largest=ranges[0][1], delay=delay, ranges=ranges)
 
             payload += ack.encode()
             self.ack_needed[space] = False
@@ -775,7 +933,19 @@ class QUICConnection:
                 self.data_blocked_pending = False
                 ack_eliciting = True
 
+            if self.max_data_pending and max_len - len(payload) > 16:
+                payload += frames.MaxData(self.max_data_local).encode()
+                self.max_data_pending = False
+                sent_frames.append(("max_data",))
+                ack_eliciting = True
+
             for stream in self.streams.values():
+                if stream.max_stream_data_pending and max_len - len(payload) > 24:
+                    payload += frames.MaxStreamData(stream.stream_id, stream.max_stream_data_local).encode()
+                    stream.max_stream_data_pending = False
+                    sent_frames.append(("max_stream_data", stream.stream_id))
+                    ack_eliciting = True
+
                 if stream.reset_pending is not None:
                     err, final = stream.reset_pending
                     payload += frames.ResetStream(stream.stream_id, err, final).encode()
@@ -837,7 +1007,7 @@ class QUICConnection:
         payload_len = len(payload) + AEAD_TAG
 
         if level == LEVEL_APPLICATION:
-            prefix, first = packet.serialize_short_header_prefix(self.remote_cid, pn_len)
+            prefix, first = packet.serialize_short_header_prefix(self.remote_cid, pn_len, key_phase=bool(self.send_key_gen & 1))
         else:
             ptype = {LEVEL_INITIAL: packet.PACKET_TYPE_INITIAL, LEVEL_HANDSHAKE: packet.PACKET_TYPE_HANDSHAKE}[level]
             token = self.retry_token if level == LEVEL_INITIAL else b""
@@ -851,6 +1021,12 @@ class QUICConnection:
         self.apply_header_protection(buf, pn_offset, pn_len, keys, long_header=(level != LEVEL_APPLICATION))
 
         self.recovery.on_packet_sent(SentPacket(pn, space, now, ack_eliciting, ack_eliciting, len(buf), sent_frames))
+
+        # RFC 9000 §10.1: restart the idle timer when sending the first
+        # ack-eliciting packet since the last packet was received.
+        if ack_eliciting and not self.ack_eliciting_since_recv and self._effective_idle_timeout() is not None:
+            self.idle_base = now
+            self.ack_eliciting_since_recv = True
 
         if self.is_client and level == LEVEL_HANDSHAKE and LEVEL_INITIAL in self.send_keys:
             self.send_keys.pop(LEVEL_INITIAL, None)
@@ -869,14 +1045,37 @@ class QUICConnection:
         for i in range(pn_len):
             buf[pn_offset + i] ^= mask[1 + i]
 
+    def _effective_idle_timeout(self) -> float | None:
+        local = self.local_max_idle / 1000.0 if self.local_max_idle else 0.0
+        peer = self.peer_max_idle / 1000.0 if self.peer_max_idle else 0.0
+        candidates = [v for v in (local, peer) if v > 0]
+        return min(candidates) if candidates else None
+
+    def idle_deadline(self) -> float | None:
+        timeout = self._effective_idle_timeout()
+        if timeout is None or self.idle_base is None:
+            return None
+        # RFC 9000 §10.1: the connection is not timed out earlier than 3 PTOs.
+        return self.idle_base + max(timeout, 3 * self.recovery.pto(self.recovery.peer_max_ack_delay))
+
     def get_timer(self) -> float | None:
         peer_mad = (
             int(self.peer_transport_params.get(TP_MAX_ACK_DELAY, 25) or 25) / 1000.0
             if self.peer_transport_params
             else 0.025
         )
-        return self.recovery.get_timer(peer_mad)
+        loss = self.recovery.get_timer(peer_mad)
+        idle = self.idle_deadline()
+        candidates = [t for t in (loss, idle) if t is not None]
+        return min(candidates) if candidates else None
 
     def handle_timer(self, now: float):
+        idle = self.idle_deadline()
+        if idle is not None and now >= idle and not self.terminated:
+            # RFC 9000 §10.1: silently close (no CONNECTION_CLOSE) and discard.
+            self.terminated = True
+            self._events.append(ConnectionTerminated(0, "idle timeout"))
+            return
+
         probes = self.recovery.on_timeout(now)
         self.on_lost(probes)

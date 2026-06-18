@@ -61,14 +61,26 @@ class HeaderProtection:
         return (encryptor.update(sample) + encryptor.finalize())[:5]
 
 class PacketKeys:
-    def __init__(self, secret: bytes, suite: Suite):
+    def __init__(self, secret: bytes, suite: Suite, hp: "HeaderProtection | None" = None):
         self.suite = suite
+        self.secret = secret
         self.key = hkdf_expand_label(secret, b"quic key", suite.key_len, suite.algorithm)
         self.iv = hkdf_expand_label(secret, b"quic iv", 12, suite.algorithm)
-        hp = hkdf_expand_label(secret, b"quic hp", suite.key_len, suite.algorithm)
 
-        self.hp = HeaderProtection(hp, suite.is_chacha)
+        # RFC 9001 §6.1: a key update does not change the header protection key,
+        # so it can be carried over from the prior generation when provided.
+        if hp is not None:
+            self.hp = hp
+        else:
+            hp_key = hkdf_expand_label(secret, b"quic hp", suite.key_len, suite.algorithm)
+            self.hp = HeaderProtection(hp_key, suite.is_chacha)
+
         self.aead = ChaCha20Poly1305(self.key) if suite.is_chacha else AESGCM(self.key)
+
+    def next_generation(self) -> "PacketKeys":
+        # RFC 9001 §6.1: secret_<n+1> = HKDF-Expand-Label(secret_<n>, "quic ku", "", Hash.length)
+        new_secret = hkdf_expand_label(self.secret, b"quic ku", self.suite.algorithm.digest_size, self.suite.algorithm)
+        return PacketKeys(new_secret, self.suite, hp=self.hp)
 
     def nonce(self, packet_number: int) -> bytes:
         pn = packet_number.to_bytes(12, "big")

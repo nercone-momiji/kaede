@@ -381,6 +381,9 @@ class H3Connection:
             self.timer.cancel()
             self.timer = None
 
+        if self.quic.terminated:
+            return
+
         when = self.quic.get_timer()
 
         if when is not None:
@@ -390,7 +393,18 @@ class H3Connection:
     def on_timer(self):
         self.timer = None
         self.quic.handle_timer(self.now())
+
+        # handle_timer may silently terminate the connection (idle timeout,
+        # RFC 9000 §10.1); surface that and reap server-side connection state.
+        terminated = any(isinstance(event, ConnectionTerminated) for event in self.quic.events())
+
         self.flush()
+
+        if terminated:
+            if self.is_client:
+                self.fail_all(ConnectionError("connection terminated"))
+            elif self.addr is not None:
+                self.protocol._reap(self.addr)
 
     def on_server_event(self, ev):
         if isinstance(ev, HeadersReceived):
@@ -733,14 +747,19 @@ class H3Protocol(asyncio.DatagramProtocol):
             self.connections_per_ip[ip] = self.connections_per_ip.get(ip, 0) + 1
 
         if conn.receive_datagram(data):
-            self.connections.pop(addr, None)
-            ip = addr[0] if isinstance(addr, tuple) else str(addr)
-            count = self.connections_per_ip.get(ip, 1)
+            self._reap(addr)
 
-            if count <= 1:
-                self.connections_per_ip.pop(ip, None)
-            else:
-                self.connections_per_ip[ip] = count - 1
+    def _reap(self, addr):
+        if self.connections.pop(addr, None) is None:
+            return
+
+        ip = addr[0] if isinstance(addr, tuple) else str(addr)
+        count = self.connections_per_ip.get(ip, 1)
+
+        if count <= 1:
+            self.connections_per_ip.pop(ip, None)
+        else:
+            self.connections_per_ip[ip] = count - 1
 
     def error_received(self, exc):
         pass
