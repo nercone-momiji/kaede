@@ -234,5 +234,9 @@ class WSClientProtocol(asyncio.Protocol):
     def connection_lost(self, exc: BaseException | None):
         if not self.handshake.done():
             self.handshake.set_exception(exc or ConnectionError("connection closed during websocket handshake"))
+
+        if not self.ready.done():
+            self.ready.set_exception(exc or ConnectionError("connection lost before websocket was ready"))
+
         if self.ws is not None and not self.ws.closed:
             self.ws.queue.put_nowait(None)

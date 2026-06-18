@@ -68,7 +68,11 @@ class H1:
                 raise ValueError(f"Content-Length exceeds max_body_size: {n}")
             body = rest[:n] if n > 0 else None
 
-        return Request(client=client, scheme=scheme, secure=secure, protocol="HTTP/1.1", method=method_b.decode("ascii"), target=target_b.decode("latin-1"), headers=headers, body=body, h2=None, h3=None, tls=tls)
+        method = method_b.decode("ascii")
+        if method not in ("GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"):
+            raise ValueError(f"unknown HTTP method: {method!r}")
+
+        return Request(client=client, scheme=scheme, secure=secure, protocol="HTTP/1.1", method=method, target=target_b.decode("latin-1"), headers=headers, body=body, h2=None, h3=None, tls=tls)
 
     @staticmethod
     def build_response(response: Response) -> bytes | tuple[bytes, os.PathLike | None]:
@@ -478,6 +482,11 @@ class H1Connection:
 
             if self.request_consumer is None:
                 self.request_consumer = self.handler.create_task(self.consume_requests())
+
+            if self.request_queue.qsize() >= self.config.max_pipeline_buffer_len:
+                self.send_error(503, "Service Unavailable")
+                self.transport.close()
+                return
 
             self.request_queue.put_nowait((request, keep_alive))
 

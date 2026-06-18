@@ -328,7 +328,7 @@ class OpenSSL:
 
         if config.cafile:
             mode = SSL_VERIFY_PEER
-            if config.verify_mode == 2:
+            if int(config.verify_mode) >= 2:
                 mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT
             ssl.SSL_CTX_set_verify(ctx, mode, None)
             ssl.SSL_CTX_load_verify_locations(ctx, config.cafile.encode(), None)

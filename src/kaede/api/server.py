@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 import signal
 import socket
 import uvloop
@@ -15,6 +16,7 @@ from ..handler.tcp import TCPProtocol
 from ..http.h1 import H1Connection, H1Protocol
 from ..http.h2 import H2Connection
 from ..http.h3 import H3Protocol
+from ..quic.tls import QuicTLSServerContext
 
 @dataclass
 class Config:
@@ -62,6 +64,7 @@ class Handler:
         self.quic_transport: asyncio.DatagramTransport | None = None
 
         self._tls_server_context: TLSContext | None = None
+        self._quic_tls_server_context: QuicTLSServerContext | None = None
 
         self.active_tasks: set[asyncio.Task] = set()
         self.active_transports: set[asyncio.Transport] = set()
@@ -78,6 +81,13 @@ class Handler:
             alpn = tuple(p for p in self.config.protocols if p != "h3")
             self._tls_server_context = TLSContext.for_server(self.config.tls, alpn=alpn)
         return self._tls_server_context
+
+    def quic_tls_server_context(self) -> QuicTLSServerContext:
+        if self._quic_tls_server_context is None:
+            alpn = tuple(p for p in self.config.protocols if p == "h3") or ("h3",)
+            self._quic_tls_server_context = QuicTLSServerContext.for_server(self.config.tls, alpn=alpn)
+
+        return self._quic_tls_server_context
 
     def make_connection(self, protocol: TCPProtocol, alpn: str | None):
         if alpn == "h2" and "h2" in self.config.protocols:
@@ -98,7 +108,8 @@ class Handler:
             self.tcp_server = await loop.create_server(lambda: TCPProtocol(is_client=False, factory=self.make_connection, tls_context=tls_context, handler=self), sock=self.listener.sock)
 
         elif kind == "quic":
-            transport, _ = await loop.create_datagram_endpoint(lambda: H3Protocol(self), sock=self.listener.sock)
+            quic_ctx = self.quic_tls_server_context()
+            transport, _ = await loop.create_datagram_endpoint(lambda: H3Protocol(self, quic_tls_context=quic_ctx), sock=self.listener.sock)
             self.quic_transport = transport
 
         else:
@@ -156,14 +167,24 @@ class Server:
 
         try:
             sock.bind(path_str)
-        except OSError:
+        except OSError as first_exc:
+            cleaned = False
             try:
                 if stat.S_ISSOCK(os.stat(path_str).st_mode):
                     os.unlink(path_str)
+                    cleaned = True
             except (FileNotFoundError, OSError):
                 pass
 
-            sock.bind(path_str)
+            if cleaned:
+                try:
+                    sock.bind(path_str)
+                except OSError:
+                    sock.close()
+                    raise
+            else:
+                sock.close()
+                raise first_exc
 
         sock.listen(socket.SOMAXCONN)
         sock.setblocking(False)
@@ -239,6 +260,7 @@ class Server:
 
         alive: set[int] = set()
         shutting_down = False
+        worker_start_times: dict[int, float] = {}
 
         shared = self.listeners(include_quic=False)
 
@@ -251,6 +273,8 @@ class Server:
                     pass
                 finally:
                     os._exit(0)
+
+            worker_start_times[pid] = time.monotonic()
             alive.add(pid)
             return pid
 
@@ -275,13 +299,24 @@ class Server:
             while alive:
                 try:
                     pid, _ = os.wait()
-                    alive.discard(pid)
-
-                    if not shutting_down and self.config.auto_restart:
-                        spawn_worker()
-
+                except InterruptedError:
+                    continue
                 except ChildProcessError:
                     break
+
+                alive.discard(pid)
+
+                if not shutting_down and self.config.auto_restart:
+                    start_time = worker_start_times.pop(pid, 0.0)
+                    uptime = time.monotonic() - start_time
+
+                    if uptime < 5.0:
+                        time.sleep(min(1.0, 5.0 - uptime))
+
+                    spawn_worker()
+
+                else:
+                    worker_start_times.pop(pid, None)
 
         finally:
             signal.signal(signal.SIGINT, original_sigint or signal.SIG_DFL)

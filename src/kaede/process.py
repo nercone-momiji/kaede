@@ -97,7 +97,7 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
         request.body = None
 
         try:
-            request.decompress(content_encoding)
+            request.decompress(content_encoding, max_size=config.max_body_size)
         except Exception:
             pass
 
@@ -119,7 +119,6 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
 
     response.headers.set("Date", email.utils.formatdate(usegmt=True), override=False)
     response.headers.set("Server", config.server_name, override=False)
-    response.headers.set("Content-Length", "0")
 
     try:
         if response.has_real_body:
@@ -198,6 +197,9 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
                 else:
                     response.headers.set("Content-Length", str(total))
 
+        else:
+            response.headers.set("Content-Length", "0")
+
         if (response.has_real_body or response.is_streaming) and response.headers.get("Content-Type", "").startswith("text/") and "charset=" not in response.headers.get("Content-Type", ""):
             response.headers.set("Content-Type", response.headers.get("Content-Type", "") + "; charset=utf-8")
 
@@ -231,7 +233,7 @@ async def process_response(response: Response, config: ClientConfig) -> Response
         response.body = None
         response.compression = True
 
-        response.decompress(content_encoding)
+        response.decompress(content_encoding, max_size=config.max_body_size)
 
         if response.body is None:
             response.body = response.compressed
@@ -242,7 +244,7 @@ async def process_response(response: Response, config: ClientConfig) -> Response
         response.body = None
         response.compression = True
 
-        response.decompress(content_encoding)
+        response.decompress(content_encoding, max_size=config.max_body_size)
 
         if response.body is not None:
             response.headers.set("Content-Length", str(len(response.body)))

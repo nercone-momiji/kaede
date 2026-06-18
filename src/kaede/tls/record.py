@@ -168,8 +168,12 @@ class TLS:
         return self.lib.tls_info(self.SSL)
 
     def free(self):
-        if getattr(self, "SSL", None):
-            self.lib.ssl.SSL_free(self.SSL)
+        ssl_handle = getattr(self, "SSL", None)
+        if ssl_handle is not None:
+            try:
+                self.lib.ssl.SSL_free(ssl_handle)
+            except Exception:
+                pass
             self.SSL = None
             self.rbio = None
             self.wbio = None

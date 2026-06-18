@@ -9,9 +9,9 @@ from . import qpack
 from ..models import Request, Response, Headers
 from ..process import process_request
 from ..quic import QUICConnection, HandshakeCompleted, StreamDataReceived, ConnectionTerminated
+from ..quic.tls import QuicTLS, QuicTLSServerContext
 from ..quic.packet import Buffer, encode_uint_var
 from ..quic.stream import stream_is_bidirectional
-from ..quic.tls import QuicTLS
 from ..handler.common import StreamState, consume_response
 
 H3_FORBIDDEN_HEADERS = ("connection", "transfer-encoding", "keep-alive", "upgrade", "proxy-connection")
@@ -193,9 +193,10 @@ class H3Connection:
 
     def feed_uni_stream(self, sid: int, data: bytes, end_stream: bool):
         buf = self.uni_buffers.setdefault(sid, bytearray())
-        buf.extend(data)
 
         if sid not in self.peer_uni_types:
+            buf.extend(data)
+
             reader = Buffer(bytes(buf))
 
             try:
@@ -204,13 +205,22 @@ class H3Connection:
                 return
 
             self.peer_uni_types[sid] = stream_type
-
             del buf[:reader.tell()]
 
-        buf.clear()
+        else:
+            buf.extend(data)
+
+        if len(buf) > 65536:
+            buf.clear()
 
     def feed_request_stream(self, sid: int, data: bytes, end_stream: bool, out: list):
         buf = self.request_buffers.setdefault(sid, bytearray())
+
+        if len(buf) + len(data) > self.max_body_size + (self.handler.config.max_header_size if self.handler else 65536):
+            self.request_buffers.pop(sid, None)
+            self.assemblers.pop(sid, None)
+            return
+
         buf.extend(data)
 
         while True:
@@ -306,11 +316,11 @@ class H3Connection:
             if asm is None:
                 return
 
-            if ev.data:
-                asm.body.extend(ev.data)
-
-                if len(asm.body) > self.max_body_size:
+            if ev.data and not asm.too_large:
+                if len(asm.body) + len(ev.data) > self.max_body_size:
                     asm.too_large = True
+                else:
+                    asm.body.extend(ev.data)
 
             if ev.stream_ended:
                 self.dispatch(ev.stream_id, asm)
@@ -518,13 +528,16 @@ class H3Connection:
         self.close()
 
 class H3Protocol(asyncio.DatagramProtocol):
-    def __init__(self, handler=None, *, is_client: bool = False, connection: H3Connection | None = None, max_connections: int = 4096):
+    def __init__(self, handler=None, *, is_client: bool = False, connection: H3Connection | None = None, max_connections: int = 4096, quic_tls_context: QuicTLSServerContext | None = None, max_connections_per_ip: int = 256):
         self.handler = handler
         self.is_client = is_client
         self.transport: asyncio.DatagramTransport | None = None
         self.connection = connection
         self.connections: dict[tuple, H3Connection] = {}
         self.max_connections = max_connections
+        self.quic_tls_context = quic_tls_context
+        self.connections_per_ip: dict[str, int] = {}
+        self.max_connections_per_ip = max_connections_per_ip
 
     def connection_made(self, transport):
         self.transport = transport
@@ -542,17 +555,35 @@ class H3Protocol(asyncio.DatagramProtocol):
         if conn is None:
             if (len(data) < 1200 or (data[0] & 0xF0) != 0xC0 or data[1:5] != b"\x00\x00\x00\x01"):
                 return
+
             if len(self.connections) >= self.max_connections:
                 return
+
+            ip = addr[0] if isinstance(addr, tuple) else str(addr)
+            if self.connections_per_ip.get(ip, 0) >= self.max_connections_per_ip:
+                return
+
             try:
-                quic = QUICConnection.create_server(data, lambda tp: QuicTLS.for_server(self.handler.config.tls, transport_params=tp))
+                if self.quic_tls_context is not None:
+                    quic = QUICConnection.create_server(data, lambda tp: self.quic_tls_context.connection(transport_params=tp))
+                else:
+                    quic = QUICConnection.create_server(data, lambda tp: QuicTLS.for_server(self.handler.config.tls, transport_params=tp))
             except Exception:
                 return
+
             conn = H3Connection(quic, self, is_client=False, addr=addr)
             self.connections[addr] = conn
+            self.connections_per_ip[ip] = self.connections_per_ip.get(ip, 0) + 1
 
         if conn.receive_datagram(data):
             self.connections.pop(addr, None)
+            ip = addr[0] if isinstance(addr, tuple) else str(addr)
+            count = self.connections_per_ip.get(ip, 1)
+
+            if count <= 1:
+                self.connections_per_ip.pop(ip, None)
+            else:
+                self.connections_per_ip[ip] = count - 1
 
     def error_received(self, exc):
         pass

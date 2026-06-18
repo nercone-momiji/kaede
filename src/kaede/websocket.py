@@ -299,10 +299,11 @@ class WebSocket:
                 self.close_transport(1002)
                 return
 
-            self.fragments.extend(frame.payload)
-            if self.max_message_size is not None and len(self.fragments) > self.max_message_size:
+            if self.max_message_size is not None and len(self.fragments) + len(frame.payload) > self.max_message_size:
                 self.close_transport(1009)
                 return
+
+            self.fragments.extend(frame.payload)
 
             if frame.fin:
                 try:

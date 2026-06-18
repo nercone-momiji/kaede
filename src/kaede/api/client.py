@@ -84,6 +84,7 @@ class Handler:
         self.locks: dict[tuple, asyncio.Lock] = {}
         self.origin_kind: dict[tuple, str] = {}
         self.connections: set = set()
+        self.connection_counts: dict[tuple, int] = {}
         self.tasks: set[asyncio.Task] = set()
 
         self._tls_client_context: TLSContext | None = None
@@ -115,7 +116,7 @@ class Handler:
         return [kind for kind, _ in kinds]
 
     def connection_count(self, key: tuple) -> int:
-        return sum(1 for c in self.connections if getattr(c, "key", None) == key)
+        return self.connection_counts.get(key, 0)
 
     async def get_connection(self, scheme: str, host: str, port: int, authority: str):
         key = (scheme, host, port)
@@ -141,6 +142,7 @@ class Handler:
 
             conn = await self.establish(scheme, host, port, authority)
             self.connections.add(conn)
+            self.connection_counts[key] = self.connection_counts.get(key, 0) + 1
             if getattr(conn, "multiplexed", False):
                 self.shared[key] = conn
             return conn
@@ -206,10 +208,21 @@ class Handler:
             conn.close()
 
     def discard(self, conn):
-        self.connections.discard(conn)
+        if conn in self.connections:
+            self.connections.discard(conn)
+
+            key = getattr(conn, "key", None)
+            if key is not None:
+                count = self.connection_counts.get(key, 1)
+                if count <= 1:
+                    self.connection_counts.pop(key, None)
+                else:
+                    self.connection_counts[key] = count - 1
+
         key = getattr(conn, "key", None)
         if key is not None and self.shared.get(key) is conn:
             self.shared.pop(key, None)
+
         idle = self.idle.get(getattr(conn, "key", None))
         if idle and conn in idle:
             idle.remove(conn)
@@ -252,6 +265,7 @@ class Handler:
             try:
                 conn = await self.connect_tcp(key, host, port, authority, self.tls_client_context())
                 self.connections.add(conn)
+                self.connection_counts[key] = self.connection_counts.get(key, 0) + 1
 
                 if conn.mode == "h2":
                     return await conn.websocket(request, subprotocols)

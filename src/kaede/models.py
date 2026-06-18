@@ -56,14 +56,14 @@ class Request:
 
         return upgrade == "websocket" and "upgrade" in connection and bool(websocket_key) and websocket_version == "13"
 
-    async def compress(self, encoding: str = "zstd", max_compressible_file_size: int = 16 * 1024 * 1024):
+    async def compress(self, encoding: str = "zstd"):
         if not (self.body is not None and self.compression):
             return
 
         if "Content-Encoding" in self.headers:
             return
 
-        content_type = (self.content_type or self.headers.get("Content-Type")).split(";", 1)[0].strip().lower() if "Content-Type" in self.headers else ""
+        content_type = (self.content_type or self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
 
         if content_type.startswith(("image/", "video/", "audio/")) and content_type != "image/svg+xml":
             return
@@ -82,23 +82,75 @@ class Request:
 
         self.headers.set("Content-Encoding", encoding)
 
-    def decompress(self, encoding: str | None = None):
+    def decompress(self, encoding: str | None = None, max_size: int | None = None):
         if not self.compression or self.body is not None or self.compressed is None:
             return
 
         encoding = encoding.strip().lower() if encoding is not None else self.headers.get("Content-Encoding", "").strip().lower()
 
         if encoding == "zstd":
-            self.body = zstandard.ZstdDecompressor().decompressobj().decompress(self.compressed)
+            decompressor = zstandard.ZstdDecompressor()
+
+            if max_size is not None:
+                try:
+                    result = decompressor.decompress(self.compressed, max_output_size=max_size + 1)
+                except Exception as exc:
+                    raise ValueError("zstd decompression failed") from exc
+
+                if len(result) > max_size:
+                    raise ValueError("decompressed body exceeds limit")
+
+                self.body = result
+
+            else:
+                self.body = decompressor.decompressobj().decompress(self.compressed)
+
         elif encoding == "br":
-            self.body = brotlicffi.decompress(self.compressed)
+            result = brotlicffi.decompress(self.compressed)
+
+            if max_size is not None and len(result) > max_size:
+                raise ValueError("decompressed body exceeds limit")
+
+            self.body = result
+
         elif encoding in ("gzip", "x-gzip"):
-            self.body = gzip.decompress(self.compressed)
+            if max_size is not None:
+                decompressor = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
+                result = decompressor.decompress(self.compressed, max_size)
+
+                if decompressor.unconsumed_tail:
+                    raise ValueError("decompressed body exceeds limit")
+
+                self.body = result
+
+            else:
+                self.body = gzip.decompress(self.compressed)
+
         elif encoding == "deflate":
-            try:
-                self.body = zlib.decompress(self.compressed)
-            except zlib.error:
-                self.body = zlib.decompress(self.compressed, -zlib.MAX_WBITS)
+            if max_size is not None:
+                try:
+                    decompressor = zlib.decompressobj()
+                    result = decompressor.decompress(self.compressed, max_size)
+
+                    if decompressor.unconsumed_tail:
+                        raise ValueError("decompressed body exceeds limit")
+
+                    self.body = result
+
+                except zlib.error:
+                    decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+                    result = decompressor.decompress(self.compressed, max_size)
+
+                    if decompressor.unconsumed_tail:
+                        raise ValueError("decompressed body exceeds limit")
+
+                    self.body = result
+
+            else:
+                try:
+                    self.body = zlib.decompress(self.compressed)
+                except zlib.error:
+                    self.body = zlib.decompress(self.compressed, -zlib.MAX_WBITS)
 
 @dataclass
 class Response:
@@ -132,7 +184,7 @@ class Response:
         if "Content-Encoding" in self.headers:
             return
 
-        content_type = (self.content_type or self.headers.get("Content-Type")).split(";", 1)[0].strip().lower() if "Content-Type" in self.headers else ""
+        content_type = (self.content_type or self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
 
         if content_type.startswith(("image/", "video/", "audio/")) and content_type != "image/svg+xml":
             return
@@ -281,7 +333,7 @@ class Response:
 
             return
 
-    def decompress(self, encoding: str | None = None):
+    def decompress(self, encoding: str | None = None, max_size: int | None = None):
         if not self.compression or self.body is not None or self.compressed is None:
             return
 
@@ -291,31 +343,46 @@ class Response:
             compressed = self.compressed
 
             if encoding == "zstd":
-                async def decompress_stream_zstd(src=compressed):
+                async def decompress_stream_zstd(src=compressed, _max=max_size):
                     decompressor = zstandard.ZstdDecompressor().decompressobj()
+                    total = 0
+
                     async for chunk in src:
                         out = decompressor.decompress(chunk)
                         if out:
+                            total += len(out)
+                            if _max is not None and total > _max:
+                                raise ValueError("decompressed streaming body exceeds limit")
                             yield out
 
                 self.body = decompress_stream_zstd()
 
             elif encoding == "br":
-                async def decompress_stream_brotli(src=compressed):
+                async def decompress_stream_brotli(src=compressed, _max=max_size):
                     decompressor = brotlicffi.Decompressor()
+                    total = 0
+
                     async for chunk in src:
                         out = decompressor.process(chunk)
                         if out:
+                            total += len(out)
+                            if _max is not None and total > _max:
+                                raise ValueError("decompressed streaming body exceeds limit")
                             yield out
 
                 self.body = decompress_stream_brotli()
 
             elif encoding in ("gzip", "x-gzip"):
-                async def decompress_stream_gzip(src=compressed):
+                async def decompress_stream_gzip(src=compressed, _max=max_size):
                     decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                    total = 0
+
                     async for chunk in src:
                         out = decompressor.decompress(chunk)
                         if out:
+                            total += len(out)
+                            if _max is not None and total > _max:
+                                raise ValueError("decompressed streaming body exceeds limit")
                             yield out
 
                     out = decompressor.flush()
@@ -325,11 +392,16 @@ class Response:
                 self.body = decompress_stream_gzip()
 
             elif encoding == "deflate":
-                async def decompress_stream_deflate(src=compressed):
+                async def decompress_stream_deflate(src=compressed, _max=max_size):
                     decompressor = zlib.decompressobj(zlib.MAX_WBITS)
+                    total = 0
+
                     async for chunk in src:
                         out = decompressor.decompress(chunk)
                         if out:
+                            total += len(out)
+                            if _max is not None and total > _max:
+                                raise ValueError("decompressed streaming body exceeds limit")
                             yield out
 
                     out = decompressor.flush()
@@ -340,16 +412,68 @@ class Response:
 
         else:
             if encoding == "zstd":
-                self.body = zstandard.ZstdDecompressor().decompressobj().decompress(self.compressed)
+                decompressor = zstandard.ZstdDecompressor()
+
+                if max_size is not None:
+                    try:
+                        result = decompressor.decompress(self.compressed, max_output_size=max_size + 1)
+                    except Exception as exc:
+                        raise ValueError("zstd decompression failed") from exc
+
+                    if len(result) > max_size:
+                        raise ValueError("decompressed body exceeds limit")
+
+                    self.body = result
+
+                else:
+                    self.body = decompressor.decompressobj().decompress(self.compressed)
+
             elif encoding == "br":
-                self.body = brotlicffi.decompress(self.compressed)
+                result = brotlicffi.decompress(self.compressed)
+
+                if max_size is not None and len(result) > max_size:
+                    raise ValueError("decompressed body exceeds limit")
+
+                self.body = result
+
             elif encoding in ("gzip", "x-gzip"):
-                self.body = gzip.decompress(self.compressed)
+                if max_size is not None:
+                    decompressor = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
+                    result = decompressor.decompress(self.compressed, max_size)
+
+                    if decompressor.unconsumed_tail:
+                        raise ValueError("decompressed body exceeds limit")
+
+                    self.body = result
+
+                else:
+                    self.body = gzip.decompress(self.compressed)
+
             elif encoding == "deflate":
-                try:
-                    self.body = zlib.decompress(self.compressed)
-                except zlib.error:
-                    self.body = zlib.decompress(self.compressed, -zlib.MAX_WBITS)
+                if max_size is not None:
+                    try:
+                        decompressor = zlib.decompressobj()
+                        result = decompressor.decompress(self.compressed, max_size)
+
+                        if decompressor.unconsumed_tail:
+                            raise ValueError("decompressed body exceeds limit")
+
+                        self.body = result
+
+                    except zlib.error:
+                        decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+                        result = decompressor.decompress(self.compressed, max_size)
+
+                        if decompressor.unconsumed_tail:
+                            raise ValueError("decompressed body exceeds limit")
+
+                        self.body = result
+
+                else:
+                    try:
+                        self.body = zlib.decompress(self.compressed)
+                    except zlib.error:
+                        self.body = zlib.decompress(self.compressed, -zlib.MAX_WBITS)
 
     async def minify(self, *, html: bool = False, css: bool = False, js: bool = False, svg: bool = False, keep_html_comments: bool = False):
         if not (self.minification and self.has_real_body):
@@ -409,7 +533,7 @@ class Headers:
         for k, v in headers.items():
             self.append(k, v)
 
-    def __getitem__(self, key: str) -> str | None:
+    def __getitem__(self, key: str) -> str | list[str] | None:
         return self.get(key.lower())
 
     def __setitem__(self, key: str, value: str):

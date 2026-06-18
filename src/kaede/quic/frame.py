@@ -57,6 +57,13 @@ class Ack:
         out.append(FRAME_ACK_ECN if self.ecn is not None else FRAME_ACK)
 
         ranges = self.ranges
+        if not ranges:
+            out += encode_uint_var(self.largest)
+            out += encode_uint_var(self.delay)
+            out += encode_uint_var(0)
+            out += encode_uint_var(0)
+            return bytes(out)
+
         largest = ranges[0][1]
         first_range = ranges[0][1] - ranges[0][0]
 

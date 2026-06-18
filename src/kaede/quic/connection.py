@@ -102,6 +102,9 @@ class QUICConnection:
         self.close_pending: frames.ConnectionClose | None = None
         self.close_sent = False
 
+        self.bytes_received: int = 0
+        self.bytes_sent_pre_validation: int = 0
+
         self.recovery = Recovery(MAX_DATAGRAM_SIZE)
         self._events: list = []
 
@@ -273,11 +276,18 @@ class QUICConnection:
             if not self.is_client:
                 self.handshake_done_pending = True
                 self.handshake_confirmed = True
+                self.send_keys.pop(LEVEL_INITIAL, None)
+                self.recv_keys.pop(LEVEL_INITIAL, None)
+                self.send_keys.pop(LEVEL_HANDSHAKE, None)
+                self.recv_keys.pop(LEVEL_HANDSHAKE, None)
             self._events.append(HandshakeCompleted(self.tls.alpn()))
 
     def receive_datagram(self, data: bytes, now: float):
         if self.terminated:
             return
+
+        if not self.is_client and not self.handshake_confirmed:
+            self.bytes_received += len(data)
 
         self.drain_buffered(now)
         offset = 0
@@ -406,7 +416,16 @@ class QUICConnection:
             return None, 0
 
         self.recv_pns[space].add(pn)
-        self.largest_recv[space] = max(largest, pn)
+
+        new_largest = max(largest, pn)
+        self.largest_recv[space] = new_largest
+
+        pns = self.recv_pns[space]
+
+        if len(pns) > 1024:
+            cutoff = new_largest - 1024
+            self.recv_pns[space] = {p for p in pns if p >= cutoff}
+
         return plaintext, pn
 
     def process_frames(self, plaintext: bytes, level: int, pn: int, now: float):
@@ -441,6 +460,10 @@ class QUICConnection:
             elif ftype is frames.StopSending:
                 self._events.append(StopSendingReceived(f.stream_id, f.error_code))
 
+                stream = self.streams.get(f.stream_id)
+                if stream is not None and stream.reset_pending is None:
+                    stream.reset_pending = (f.error_code, stream.sender.written)
+
             elif ftype is frames.MaxData:
                 self.peer_max_data = max(self.peer_max_data, f.maximum)
 
@@ -465,6 +488,10 @@ class QUICConnection:
 
             elif ftype is frames.HandshakeDone:
                 self.handshake_confirmed = True
+                self.send_keys.pop(LEVEL_INITIAL, None)
+                self.recv_keys.pop(LEVEL_INITIAL, None)
+                self.send_keys.pop(LEVEL_HANDSHAKE, None)
+                self.recv_keys.pop(LEVEL_HANDSHAKE, None)
 
         if ack_eliciting:
             self.ack_needed[space] = True
@@ -499,12 +526,20 @@ class QUICConnection:
 
         out: list[bytes] = []
         while True:
+            if not self.is_client and not self.handshake_confirmed:
+                anti_amp_budget = 3 * self.bytes_received - self.bytes_sent_pre_validation
+                if anti_amp_budget <= 0:
+                    break
+
             datagram, progressed = self.build_datagram(now)
 
             if not progressed:
                 break
 
             out.append(datagram)
+
+            if not self.is_client and not self.handshake_confirmed:
+                self.bytes_sent_pre_validation += len(datagram)
 
             if self.terminated:
                 break
@@ -595,7 +630,11 @@ class QUICConnection:
 
                 max_offset = stream.max_stream_data_remote
                 while budget > 16 and stream.sender.has_data_to_send(max_offset):
-                    frame = stream.sender.get_frame(min(budget, 1100), max_offset)
+                    avail_cwnd = self.recovery.congestion_window - self.recovery.bytes_in_flight
+                    if avail_cwnd <= 0:
+                        break
+
+                    frame = stream.sender.get_frame(min(budget, 1100, max(1, avail_cwnd)), max_offset)
                     if frame is None:
                         break
 

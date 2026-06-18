@@ -24,10 +24,43 @@ CB_ALERT = ctypes.CFUNCTYPE(ctypes.c_int, VOID_P, ctypes.c_ubyte, VOID_P)
 
 QuicTLSError = TLSError
 
+class QuicTLSServerContext:
+    def __init__(self, lib: OpenSSL, ctx: int, keepalive: list, alpn: tuple[str, ...]):
+        self.lib = lib
+        self.ctx = ctx
+        self.keepalive = keepalive
+        self.alpn = alpn
+
+    @classmethod
+    def for_server(cls, config: TLSServerConfig, *, alpn: tuple[str, ...] = ("h3",)) -> "QuicTLSServerContext":
+        lib = OpenSSL.get()
+        ctx, keepalive = lib.new_context(is_client=False, alpn=alpn, groups=config.groups, ciphers=config.ciphers, min_version=TLS1_3_VERSION, max_version=TLS1_3_VERSION)
+        lib.apply_server_config(ctx, config)
+        return cls(lib, ctx, keepalive, alpn)
+
+    def connection(self, *, transport_params: bytes = b"") -> "QuicTLS":
+        return QuicTLS(self.ctx, self.lib, is_client=False, transport_params=transport_params, owns_ctx=False)
+
+    def free(self):
+        ctx = getattr(self, "ctx", None)
+        if ctx:
+            try:
+                self.lib.ssl.SSL_CTX_free(ctx)
+            except Exception:
+                pass
+            self.ctx = None
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
+
 class QuicTLS:
-    def __init__(self, ctx_ptr: int, lib: OpenSSL, *, is_client: bool, server_name: str | None = None, verify_hostname: bool = False, transport_params: bytes = b"", keepalive=()):
+    def __init__(self, ctx_ptr: int, lib: OpenSSL, *, is_client: bool, owns_ctx: bool = True, server_name: str | None = None, verify_hostname: bool = False, transport_params: bytes = b"", keepalive=()):
         self.lib = lib
         self.ctx = ctx_ptr
+        self.owns_ctx = owns_ctx
         self.keepalive = list(keepalive)
         self.is_client = is_client
         self.server_name = server_name
@@ -48,7 +81,8 @@ class QuicTLS:
         ssl = self.lib.ssl
         self.SSL = ssl.SSL_new(ctx_ptr)
         if not self.SSL:
-            ssl.SSL_CTX_free(ctx_ptr)
+            if owns_ctx:
+                ssl.SSL_CTX_free(ctx_ptr)
             self.ctx = None
             raise TLSError(f"SSL_new failed: {self.lib.errors()}")
 
@@ -221,11 +255,19 @@ class QuicTLS:
         return self.lib.tls_info(self.SSL)
 
     def free(self):
-        if getattr(self, "SSL", None):
-            self.lib.ssl.SSL_free(self.SSL)
+        ssl_handle = getattr(self, "SSL", None)
+        if ssl_handle is not None:
+            try:
+                self.lib.ssl.SSL_free(ssl_handle)
+            except Exception:
+                pass
             self.SSL = None
-        if getattr(self, "ctx", None):
-            self.lib.ssl.SSL_CTX_free(self.ctx)
+
+        if getattr(self, "owns_ctx", True) and getattr(self, "ctx", None):
+            try:
+                self.lib.ssl.SSL_CTX_free(self.ctx)
+            except Exception:
+                pass
             self.ctx = None
 
     def __del__(self):
