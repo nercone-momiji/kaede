@@ -318,36 +318,36 @@ class TestResponseHasNoBody:
 class TestBuildResponseHead:
     def test_status_line_format(self):
         """RFC 9112 §4: HTTP-version SP status-code SP reason-phrase CRLF"""
-        result = H1.build_response_head(Response(status_code=200))
+        result = H1.build_response_headers(Response(status_code=200))
         assert result.startswith(b"HTTP/1.1 200 ")
 
     def test_ends_with_double_crlf(self):
-        result = H1.build_response_head(Response(status_code=404))
+        result = H1.build_response_headers(Response(status_code=404))
         assert result.endswith(b"\r\n\r\n")
 
     def test_known_status_phrase(self):
-        result = H1.build_response_head(Response(status_code=404))
+        result = H1.build_response_headers(Response(status_code=404))
         assert b"Not Found" in result
 
     def test_crlf_injection_in_header_name_prevented(self):
         """RFC 9112 §5: CRLF injection must not be possible"""
         response = Response(status_code=200, headers=Headers({"X-Evil\r\nInjected": "val"}))
-        result = H1.build_response_head(response)
+        result = H1.build_response_headers(response)
         assert b"Injected" not in result
 
     def test_crlf_injection_in_header_value_prevented(self):
         response = Response(status_code=200, headers=Headers({"X-Test": "val\r\nEvil: hdr"}))
-        result = H1.build_response_head(response)
+        result = H1.build_response_headers(response)
         assert b"Evil: hdr" not in result
 
     def test_null_byte_in_header_prevented(self):
         response = Response(status_code=200, headers=Headers({"X-Test": "val\x00ue"}))
-        result = H1.build_response_head(response)
+        result = H1.build_response_headers(response)
         assert b"\x00" not in result
 
     def test_normal_headers_included(self):
         response = Response(status_code=200, headers=Headers({"Content-Type": "text/html"}))
-        result = H1.build_response_head(response)
+        result = H1.build_response_headers(response)
         assert b"content-type: text/html\r\n" in result
 
 # RFC 9112 §3: Request building
@@ -355,12 +355,12 @@ class TestBuildResponseHead:
 class TestBuildRequest:
     def test_request_line_format(self):
         req = Request(method="GET", target="/path", headers=Headers({"Host": "example.com"}))
-        result = H1.build_request_head(req)
+        result = H1.build_request_headers(req)
         assert result.startswith(b"GET /path HTTP/1.1\r\n")
 
     def test_ends_with_double_crlf(self):
         req = Request(method="GET", target="/", headers=Headers({"Host": "example.com"}))
-        result = H1.build_request_head(req)
+        result = H1.build_request_headers(req)
         assert result.endswith(b"\r\n\r\n")
 
     def test_with_body(self):
@@ -376,7 +376,7 @@ class TestBuildRequest:
 
     def test_crlf_injection_in_header_prevented(self):
         req = Request(method="GET", target="/", headers=Headers({"X-H\r\nInj": "v"}))
-        result = H1.build_request_head(req)
+        result = H1.build_request_headers(req)
         assert b"Inj" not in result
 
 # RFC 9112 §4: Response parsing
@@ -418,7 +418,7 @@ class TestParseResponse:
             H1.parse_response(b"HTTP/1.1 1000 Too Long\r\n\r\n")
 
     def test_1xx_informational_status_parsed(self):
-        status, _, _, _ = H1.parse_response_head(b"HTTP/1.1 100 Continue")
+        status, _, _, _ = H1.parse_response_headers(b"HTTP/1.1 100 Continue")
         assert status == 100
 
     def test_obs_fold_in_response_rejected(self):
@@ -667,7 +667,7 @@ class TestResponseParsingEdgeCases:
     @pytest.mark.parametrize("code", [200, 301, 400, 500, 600, 700, 999])
     def test_three_digit_status_codes_parseable(self, code):
         """Any 3-digit status code is syntactically valid per RFC 9112"""
-        status, _, _, _ = H1.parse_response_head(f"HTTP/1.1 {code} Reason".encode())
+        status, _, _, _ = H1.parse_response_headers(f"HTTP/1.1 {code} Reason".encode())
         assert status == code
 
     def test_response_with_both_te_and_cl_te_wins(self):
@@ -680,17 +680,17 @@ class TestResponseParsingEdgeCases:
         )
         assert resp.body == b"hello"
 
-# RFC 9112 §4: build_response_head edge cases
+# RFC 9112 §4: build_response_headers edge cases
 
 class TestBuildResponseHeadEdgeCases:
     def test_non_standard_status_code_empty_phrase(self):
         """Non-standard 3-digit status codes produce an empty reason phrase"""
-        result = H1.build_response_head(Response(status_code=999))
+        result = H1.build_response_headers(Response(status_code=999))
         assert b"HTTP/1.1 999 " in result
         assert result.endswith(b"\r\n\r\n")
 
     def test_response_with_no_headers(self):
-        result = H1.build_response_head(Response(status_code=200))
+        result = H1.build_response_headers(Response(status_code=200))
         assert result == b"HTTP/1.1 200 OK\r\n\r\n"
 
     def test_all_headers_included_in_output(self):
@@ -698,7 +698,7 @@ class TestBuildResponseHeadEdgeCases:
             status_code=200,
             headers=Headers({"Content-Type": "text/html", "X-Custom": "val"}),
         )
-        result = H1.build_response_head(response)
+        result = H1.build_response_headers(response)
         assert b"content-type: text/html\r\n" in result
         assert b"x-custom: val\r\n" in result
 
@@ -707,7 +707,7 @@ class TestBuildResponseHeadEdgeCases:
 class TestBuildRequestEdgeCases:
     def test_request_method_and_target_in_line(self):
         req = Request(method="DELETE", target="/resource/1", headers=Headers({"Host": "example.com"}))
-        result = H1.build_request_head(req)
+        result = H1.build_request_headers(req)
         assert result.startswith(b"DELETE /resource/1 HTTP/1.1\r\n")
 
     def test_request_with_multiple_headers(self):
@@ -716,7 +716,7 @@ class TestBuildRequestEdgeCases:
             target="/",
             headers=Headers({"Host": "example.com", "Content-Type": "application/json"}),
         )
-        result = H1.build_request_head(req)
+        result = H1.build_request_headers(req)
         assert b"content-type: application/json\r\n" in result
 
 # RFC 9112 §6: build_response return type
@@ -796,48 +796,48 @@ class TestDecodeChunkedDirect:
         with pytest.raises(ValueError):
             H1.decode_chunked(b"5\r\nhelloxx0\r\n\r\n")
 
-# RFC 9112 §4: parse_response_head edge cases
+# RFC 9112 §4: parse_response_headers edge cases
 
 class TestParseResponseHeadEdgeCases:
     def test_http10_accepted(self):
         """RFC 9112 §2.5: clients MUST accept HTTP/1.0 responses from servers."""
-        status, _, _, protocol = H1.parse_response_head(b"HTTP/1.0 200 OK")
+        status, _, _, protocol = H1.parse_response_headers(b"HTTP/1.0 200 OK")
         assert status == 200
         assert protocol == "HTTP/1.0"
 
     def test_http11_not_flagged_as_http10(self):
         """HTTP/1.1 responses must not be flagged as HTTP/1.0."""
-        _, _, _, protocol = H1.parse_response_head(b"HTTP/1.1 200 OK")
+        _, _, _, protocol = H1.parse_response_headers(b"HTTP/1.1 200 OK")
         assert protocol != "HTTP/1.0"
 
     def test_http20_rejected(self):
         """HTTP/2.0 version on an HTTP/1.1 parser must raise ValueError."""
         with pytest.raises(ValueError):
-            H1.parse_response_head(b"HTTP/2.0 200 OK")
+            H1.parse_response_headers(b"HTTP/2.0 200 OK")
 
     def test_too_few_parts_raises(self):
         """Status line with only one token must raise ValueError."""
         with pytest.raises(ValueError):
-            H1.parse_response_head(b"HTTP/1.1")
+            H1.parse_response_headers(b"HTTP/1.1")
 
     def test_empty_reason_phrase_accepted(self):
         """RFC 9112 §4: The reason phrase MAY be empty."""
-        status, phrase, _, _ = H1.parse_response_head(b"HTTP/1.1 200 ")
+        status, phrase, _, _ = H1.parse_response_headers(b"HTTP/1.1 200 ")
         assert status == 200
         assert isinstance(phrase, str)
 
     def test_non_numeric_status_raises(self):
         """RFC 9112 §4: status-code MUST be three decimal digits."""
         with pytest.raises(ValueError):
-            H1.parse_response_head(b"HTTP/1.1 OK 200")
+            H1.parse_response_headers(b"HTTP/1.1 OK 200")
 
     def test_two_digit_status_raises(self):
         """RFC 9112 §4: status-code must be exactly three digits."""
         with pytest.raises(ValueError):
-            H1.parse_response_head(b"HTTP/1.1 20 OK")
+            H1.parse_response_headers(b"HTTP/1.1 20 OK")
 
     def test_valid_response_parses_headers(self):
-        status, _, headers, _ = H1.parse_response_head(
+        status, _, headers, _ = H1.parse_response_headers(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nX-Custom: val"
         )
         assert status == 200

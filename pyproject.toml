@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "nercone-kaede"
-version = "3.1.0"
+version = "3.2.0"
 description = "Python Library for Processing HTTP Request/Response"
 readme = { file = "README.md", content-type = "text/markdown" }
 authors = [ { name = "Nercone", email = "nercone@nercone.dev" } ]

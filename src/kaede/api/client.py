@@ -290,7 +290,7 @@ class Handler:
             protocol.transport.write(H1.build_request(request))
 
         head = await asyncio.wait_for(protocol.handshake, self.config.read_timeout)
-        status, _, headers = H1.parse_response_head(head)
+        status, _, headers = H1.parse_response_headers(head)
 
         accept = headers.get("Sec-WebSocket-Accept") or ""
         upgrade = (headers.get("Upgrade") or "").lower()

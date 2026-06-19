@@ -128,12 +128,12 @@ class H1:
     @staticmethod
     def build_response(response: Response) -> bytes | tuple[bytes, os.PathLike | None]:
         if response.has_real_body:
-            return H1.build_response_head(response) + response.body
+            return H1.build_response_headers(response) + response.body
         else:
-            return H1.build_response_head(response), response.body
+            return H1.build_response_headers(response), response.body
 
     @staticmethod
-    def build_response_head(response: Response) -> bytes:
+    def build_response_headers(response: Response) -> bytes:
         try:
             phrase = HTTPStatus(response.status_code).phrase
         except ValueError:
@@ -154,12 +154,12 @@ class H1:
     @staticmethod
     def build_request(request: Request) -> bytes:
         if request.body is not None:
-            return H1.build_request_head(request) + request.body
+            return H1.build_request_headers(request) + request.body
 
-        return H1.build_request_head(request)
+        return H1.build_request_headers(request)
 
     @staticmethod
-    def build_request_head(request: Request) -> bytes:
+    def build_request_headers(request: Request) -> bytes:
         built = f"{request.method} {request.target} HTTP/1.1\r\n"
         for key, value in request.headers.items():
             if any(c in key for c in "\r\n\x00") or any(c in value for c in "\r\n\x00"):
@@ -173,7 +173,7 @@ class H1:
         return method.upper() == "HEAD" or 100 <= status_code < 200 or status_code in (204, 205, 304)
 
     @staticmethod
-    def parse_response_head(head: bytes) -> tuple[int, str, Headers, bool]:
+    def parse_response_headers(head: bytes) -> tuple[int, str, Headers, bool]:
         lines = head.split(b"\r\n")
         if not lines or not lines[0]:
             raise ValueError("empty HTTP/1 status line")
@@ -222,7 +222,7 @@ class H1:
         if not sep:
             raise ValueError("incomplete HTTP/1.1 response: missing header terminator")
 
-        status, _, headers, protocol = H1.parse_response_head(head)
+        status, _, headers, protocol = H1.parse_response_headers(head)
 
         body: bytes | None = None
 
@@ -629,7 +629,7 @@ class H1Connection:
 
         if response.is_streaming:
             if H1.response_has_no_body(response.status_code, request.method):
-                self.transport.write(H1.build_response_head(response))
+                self.transport.write(H1.build_response_headers(response))
                 if hasattr(response.body, "aclose"):
                     try:
                         await response.body.aclose()
@@ -663,7 +663,7 @@ class H1Connection:
         if self.transport is None:
             return
 
-        self.transport.write(H1.build_response_head(response))
+        self.transport.write(H1.build_response_headers(response))
 
         try:
             async for chunk in response.body:
@@ -799,7 +799,7 @@ class H1Connection:
                 del self.buffer[:idx + 4]
 
                 try:
-                    status, _, headers, protocol = H1.parse_response_head(head)
+                    status, _, headers, protocol = H1.parse_response_headers(head)
                 except ValueError as exc:
                     self.fail_request(exc)
                     return
