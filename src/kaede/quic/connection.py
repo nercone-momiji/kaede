@@ -32,25 +32,23 @@ TP_MAX_ACK_DELAY = 0x0B
 TP_ACTIVE_CONNECTION_ID_LIMIT = 0x0E
 TP_INITIAL_SCID = 0x0F
 TP_RETRY_SOURCE_CONNECTION_ID = 0x10
-TP_MAX_DATAGRAM_FRAME_SIZE = 0x20  # RFC 9221
+TP_MAX_DATAGRAM_FRAME_SIZE = 0x20
 
 DEFAULT_MAX_DATAGRAM_FRAME_SIZE = 65535
 
 def make_retry_token(secret: bytes, original_dcid: bytes) -> bytes:
-    # Stateless Retry token (RFC 9000 §8.1.1): the original Destination
-    # Connection ID, authenticated with HMAC so it can be validated without
-    # per-client state. A production server would also bind the client address
-    # and an expiry timestamp.
     mac = hmac.new(secret, original_dcid, hashlib.sha256).digest()[:16]
     return original_dcid + mac
 
 def validate_retry_token(secret: bytes, token: bytes) -> bytes | None:
-    if len(token) < 24:  # >= 8-byte ODCID + 16-byte MAC
+    if len(token) < 24:
         return None
+
     original_dcid, mac = token[:-16], token[-16:]
     expected = hmac.new(secret, original_dcid, hashlib.sha256).digest()[:16]
     if hmac.compare_digest(mac, expected):
         return original_dcid
+
     return None
 
 DEFAULT_MAX_DATA = 1 << 24
@@ -88,13 +86,8 @@ class DatagramReceived:
 
 @dataclass
 class QuicSession:
-    """Saved session state that enables 0-RTT resumption on the next connection.
-
-    Pass an instance of this to *QUICConnection.create_client* (via the *session*
-    parameter) to attempt 0-RTT on the resumed connection.
-    """
-    tls_session: bytes          # serialized SSL_SESSION (DER)
-    peer_transport_params: bytes  # serialized server transport parameters
+    tls_session: bytes
+    peer_transport_params: bytes
 
 def encode_transport_parameters(params: dict[int, int | bytes]) -> bytes:
     buf = bytearray()
@@ -146,10 +139,7 @@ class QUICConnection:
 
         self.recovery = Recovery(MAX_DATAGRAM_SIZE)
 
-        # Idle timeout (RFC 9000 §10.1). The effective timeout is the minimum of
-        # both endpoints' advertised values; the timer restarts on a successfully
-        # processed packet and on sending the first ack-eliciting packet since.
-        self.local_max_idle = 30000  # milliseconds; mirrors the advertised value
+        self.local_max_idle = 30000
         self.peer_max_idle = 0
         self.idle_base: float | None = None
         self.ack_eliciting_since_recv = False
@@ -162,11 +152,6 @@ class QUICConnection:
         self.send_keys: dict[int, PacketKeys] = {}
         self.recv_keys: dict[int, PacketKeys] = {}
 
-        # Key update state (RFC 9001 §6). Send and receive key generations are
-        # tracked independently so updates initiated by either endpoint are
-        # handled; the Key Phase bit transmitted/expected is generation & 1.
-        # *_next hold precomputed next-generation keys; recv_keys_prev retains
-        # the prior generation to decrypt reordered packets.
         self.send_key_gen = 0
         self.recv_key_gen = 0
         self.send_keys_next: PacketKeys | None = None
@@ -197,21 +182,14 @@ class QUICConnection:
         self.max_uni_streams: int | None = None
         self.data_sent = 0
 
-        # Receive-side connection flow control (RFC 9000 §4). max_data_local is
-        # the connection limit we advertise; it is extended via MAX_DATA frames
-        # as the application consumes stream data.
         self.max_data_local = DEFAULT_MAX_DATA
         self.data_received = 0
         self.max_data_pending = False
 
-        # Unreliable datagrams (RFC 9221). We advertise our receive limit; the
-        # peer's limit (0 = unsupported) gates what we may send.
         self.local_max_datagram_frame_size = DEFAULT_MAX_DATAGRAM_FRAME_SIZE
         self.peer_max_datagram_frame_size = 0
         self.datagrams_pending: list[bytes] = []
 
-        # Stateless reset (RFC 9000 §10.3). Only a server advertises a token (in
-        # transport parameters); the peer stores it to recognise a reset.
         self.stateless_reset_token = b""
         self.peer_stateless_reset_token = b""
         self.suite = suite_for(INITIAL_CIPHER)
@@ -227,9 +205,6 @@ class QUICConnection:
         self.retry_token: bytes = b""
         self.retry_source_cid: bytes | None = None
 
-        # Connection ID management (RFC 9000 §5.1). Sequence 0 is the CID used
-        # during the handshake. We issue additional CIDs so the peer has spares
-        # (for migration / privacy) and track the peer's CIDs.
         self.local_active_cid_limit = 2
         self.local_cid_seqs: set[int] = {0}
         self.local_cid_info: dict[int, tuple[bytes, bytes]] = {}
@@ -241,7 +216,7 @@ class QUICConnection:
         self.remote_cid_seq = 0
         self.peer_retire_prior_to = 0
         if not is_client:
-            self.peer_cids[0] = remote_cid  # the client's initial Source CID
+            self.peer_cids[0] = remote_cid
 
         self._tls_factory = None
 
@@ -271,9 +246,6 @@ class QUICConnection:
         conn = cls(is_client=True, tls=tls, original_dcid=original_dcid, local_cid=local_cid, remote_cid=original_dcid)
         conn._tls_factory = tls_factory
 
-        # Pre-populate peer transport parameters from the saved session so the
-        # client can send 0-RTT data immediately without waiting for the server's
-        # transport parameters to arrive (RFC 9001 §4.6.1).
         if session and session.peer_transport_params:
             saved_tp = decode_transport_parameters(session.peer_transport_params)
             conn.peer_transport_params = saved_tp
@@ -286,9 +258,6 @@ class QUICConnection:
 
     @staticmethod
     def create_retry(first_datagram: bytes, retry_secret: bytes) -> bytes:
-        # RFC 9000 §8.1: generate a Retry packet for address validation. The
-        # token carries the original DCID so the retried Initial can be checked
-        # statelessly.
         hdr = packet.parse_long_header(first_datagram, 0)
         original_dcid = hdr.destination_cid
         retry_scid = os.urandom(8)
@@ -303,9 +272,6 @@ class QUICConnection:
         if len(original_dcid) < 8:
             raise ValueError(f"Initial packet DCID too short: {len(original_dcid)} bytes (minimum 8)")
 
-        # If Retry is enabled, the retried Initial must carry a valid token; its
-        # DCID is the Retry's SCID and is used for Initial keys, while the
-        # advertised original_destination_connection_id is the true ODCID.
         advertised_odcid = original_dcid
         retry_source_cid: bytes | None = None
         if retry_secret is not None:
@@ -390,16 +356,17 @@ class QUICConnection:
         stream.sender.write(data, end_stream)
 
     def send_datagram(self, data: bytes):
-        # RFC 9221: only after the peer advertised a non-zero limit, and never
-        # larger than that limit (frame type + length + payload). DATAGRAM
-        # frames cannot be fragmented, so the frame must also fit in one packet.
         if self.peer_max_datagram_frame_size <= 0:
             raise ValueError("peer does not support QUIC DATAGRAM frames")
+
         frame_size = len(frames.Datagram(data).encode())
+
         if frame_size > self.peer_max_datagram_frame_size:
             raise ValueError("DATAGRAM frame exceeds peer's max_datagram_frame_size")
+
         if frame_size > MAX_DATAGRAM_SIZE - 64:
             raise ValueError("DATAGRAM frame too large to fit a single packet")
+
         self.datagrams_pending.append(data)
 
     def reset_stream(self, stream_id: int, error_code: int):
@@ -416,31 +383,16 @@ class QUICConnection:
         return out
 
     def get_session(self) -> "QuicSession | None":
-        """Return a *QuicSession* that can be used for 0-RTT on the next connection.
-
-        Only available on the client side after a successful handshake.  Returns
-        *None* if no session ticket has been received yet.
-        """
         if not self.is_client:
             return None
         session_bytes = self.tls.get_session_bytes()
         if not session_bytes:
             return None
-        return QuicSession(
-            tls_session=session_bytes,
-            peer_transport_params=self.tls.peer_transport_params,
-        )
+        return QuicSession(tls_session=session_bytes, peer_transport_params=self.tls.peer_transport_params)
 
     def install_handshake_keys(self):
-        # 0-RTT: install LEVEL_EARLY keys independently (only one direction per
-        # endpoint: client gets write, server gets read).  Skip once APPLICATION
-        # keys are available — the 0-RTT phase is over and should not be revived
-        # even though tls.secrets still holds the EARLY secret.
         if LEVEL_APPLICATION not in self.send_keys:
-            for direction, keys_dict, secret_fn in (
-                ("write", self.send_keys, self.tls.write_secret),
-                ("read",  self.recv_keys, self.tls.read_secret),
-            ):
+            for direction, keys_dict, secret_fn in (("write", self.send_keys, self.tls.write_secret), ("read",  self.recv_keys, self.tls.read_secret)):
                 if LEVEL_EARLY not in keys_dict:
                     secret = secret_fn(LEVEL_EARLY)
                     if secret:
@@ -456,17 +408,14 @@ class QUICConnection:
                 if ws and rs:
                     name = self.tls.cipher_name() or INITIAL_CIPHER
                     self.suite = suite_for(name)
+
                     self.send_keys[level] = PacketKeys(ws, self.suite)
                     self.recv_keys[level] = PacketKeys(rs, self.suite)
 
                     if level == LEVEL_APPLICATION:
-                        # Precompute the next key generation so a peer-initiated
-                        # key update can be processed immediately (RFC 9001 §6).
                         self.send_keys_next = self.send_keys[level].next_generation()
                         self.recv_keys_next = self.recv_keys[level].next_generation()
-                        # 0-RTT is over once 1-RTT keys are available (RFC 9001 §4.9.3).
-                        # Both directions are discarded: the client stops sending
-                        # 0-RTT, and the server stops accepting it.
+
                         self.send_keys.pop(LEVEL_EARLY, None)
                         self.recv_keys.pop(LEVEL_EARLY, None)
 
@@ -487,12 +436,12 @@ class QUICConnection:
                     self.close(0x08, "original_destination_connection_id mismatch", application=False)
                     return
 
-                # RFC 9000 §7.3: validate retry_source_connection_id consistency.
                 peer_rscid = self.peer_transport_params.get(TP_RETRY_SOURCE_CONNECTION_ID)
                 if self.retry_source_cid is not None:
                     if not isinstance(peer_rscid, bytes) or peer_rscid != self.retry_source_cid:
                         self.close(0x08, "retry_source_connection_id mismatch", application=False)
                         return
+
                 elif peer_rscid is not None:
                     self.close(0x08, "unexpected retry_source_connection_id", application=False)
                     return
@@ -504,8 +453,10 @@ class QUICConnection:
             peer_token = self.peer_transport_params.get(TP_STATELESS_RESET_TOKEN)
             if isinstance(peer_token, (bytes, bytearray)) and len(peer_token) == 16:
                 self.peer_stateless_reset_token = bytes(peer_token)
+
             self.max_bidi_streams = int(self.peer_transport_params.get(TP_INITIAL_MAX_STREAMS_BIDI, DEFAULT_MAX_STREAMS) or DEFAULT_MAX_STREAMS)
             self.max_uni_streams = int(self.peer_transport_params.get(TP_INITIAL_MAX_STREAMS_UNI, DEFAULT_MAX_STREAMS) or DEFAULT_MAX_STREAMS)
+
             for stream in self.streams.values():
                 if stream.max_stream_data_remote == 0:
                     stream.max_stream_data_remote = self.peer_initial_stream_limit(stream.stream_id)
@@ -516,7 +467,7 @@ class QUICConnection:
                 self.handshake_done_pending = True
                 self.handshake_confirmed = True
 
-            self._issue_connection_ids()
+            self.issue_connection_ids()
             self._events.append(HandshakeCompleted(self.tls.alpn()))
 
     def receive_datagram(self, data: bytes, now: float):
@@ -553,8 +504,6 @@ class QUICConnection:
 
             offset += consumed
             self.run_handshake()
-            # Retry buffered packets (e.g. 0-RTT) that may now be decryptable
-            # after keys were just installed by run_handshake().
             self.drain_buffered(now)
 
     def drain_buffered(self, now: float):
@@ -621,23 +570,21 @@ class QUICConnection:
         dcid_start = offset + 1
         dcid_end = dcid_start + len(self.local_cid)
         if len(data) < dcid_end or data[dcid_start:dcid_end] != self.local_cid:
-            self._maybe_stateless_reset(data)
+            self.maybe_stateless_reset(data)
             return len(data) - offset
 
         pn_offset = offset + 1 + len(self.local_cid)
         plaintext, pn = self.decrypt(data, offset, pn_offset, keys, level, long_header=False, packet_end=len(data))
 
         if plaintext is None:
-            self._maybe_stateless_reset(data)
+            self.maybe_stateless_reset(data)
             return len(data) - offset
 
         self.process_frames(plaintext, level, pn, now)
 
         return len(data) - offset
 
-    def _maybe_stateless_reset(self, data: bytes):
-        # RFC 9000 §10.3: a packet that cannot be associated with a connection
-        # may be a Stateless Reset, identified by its trailing 16-byte token.
+    def maybe_stateless_reset(self, data: bytes):
         if self.terminated:
             return
         if self.peer_stateless_reset_token and len(data) >= 21 and data[-16:] == self.peer_stateless_reset_token:
@@ -683,7 +630,7 @@ class QUICConnection:
             except Exception:
                 return None, 0
         else:
-            plaintext = self._decrypt_application((buf[0] >> 2) & 1, pn, header, ciphertext)
+            plaintext = self.decrypt_application((buf[0] >> 2) & 1, pn, header, ciphertext)
             if plaintext is None:
                 return None, 0
 
@@ -700,7 +647,7 @@ class QUICConnection:
 
         return plaintext, pn
 
-    def _decrypt_application(self, key_phase_bit: int, pn: int, header: bytes, ciphertext: bytes) -> bytes | None:
+    def decrypt_application(self, key_phase_bit: int, pn: int, header: bytes, ciphertext: bytes) -> bytes | None:
         current = self.recv_keys.get(LEVEL_APPLICATION)
         if current is None:
             return None
@@ -711,18 +658,18 @@ class QUICConnection:
             except Exception:
                 return None
 
-        # The Key Phase bit differs: either a peer-initiated key update
-        # (next generation) or a reordered packet from the previous generation
-        # (RFC 9001 §6.3, §6.4).
         if self.recv_keys_next is not None:
             try:
                 plaintext = self.recv_keys_next.decrypt(pn, header, ciphertext)
             except Exception:
                 plaintext = None
+
             if plaintext is not None:
-                self._advance_recv_keys()
+                self.advance_recv_keys()
+
                 if self.send_key_gen < self.recv_key_gen:
-                    self._advance_send_keys()  # RFC 9001 §6.1: respond with updated keys
+                    self.advance_send_keys()
+
                 return plaintext
 
         if self.recv_keys_prev is not None:
@@ -733,39 +680,34 @@ class QUICConnection:
 
         return None
 
-    def _advance_recv_keys(self):
+    def advance_recv_keys(self):
         self.recv_keys_prev = self.recv_keys[LEVEL_APPLICATION]
         self.recv_keys[LEVEL_APPLICATION] = self.recv_keys_next
         self.recv_keys_next = self.recv_keys[LEVEL_APPLICATION].next_generation()
         self.recv_key_gen += 1
 
-    def _advance_send_keys(self):
+    def advance_send_keys(self):
         self.send_keys[LEVEL_APPLICATION] = self.send_keys_next
         self.send_keys_next = self.send_keys[LEVEL_APPLICATION].next_generation()
         self.send_key_gen += 1
 
     def initiate_key_update(self):
-        # RFC 9001 §6.2: a key update may only be initiated after the handshake
-        # is confirmed; rotate our send keys, and the receive side rotates when
-        # the peer responds with the new Key Phase.
         if not self.handshake_confirmed or LEVEL_APPLICATION not in self.send_keys or self.send_keys_next is None:
             return
+
         if self.send_key_gen > self.recv_key_gen:
-            return  # a previously initiated update is still outstanding
-        self._advance_send_keys()
+            return
+
+        self.advance_send_keys()
 
     def process_frames(self, plaintext: bytes, level: int, pn: int, now: float):
         space = level_to_space(level)
         buf = Buffer(plaintext)
         ack_eliciting = False
 
-        # Record when the largest packet number in this space arrived, so the
-        # ACK Delay field can be reported accurately (RFC 9000 §13.2.5).
         if pn == self.largest_recv.get(space):
             self.largest_recv_time[space] = now
 
-        # RFC 9000 §10.1: restart the idle timer on a successfully processed
-        # packet; a subsequent ack-eliciting send may restart it once more.
         self.idle_base = now
         self.ack_eliciting_since_recv = False
 
@@ -776,8 +718,6 @@ class QUICConnection:
             if ftype is not frames.Padding and ftype is not frames.Ack and ftype is not frames.ConnectionClose:
                 ack_eliciting = True
 
-            # RFC 9000 §12.5: ACK, CRYPTO, HandshakeDone, and CONNECTION_CLOSE
-            # frames must not appear in 0-RTT packets.
             if level == LEVEL_EARLY and ftype in (frames.Ack, frames.Crypto, frames.HandshakeDone, frames.ConnectionClose):
                 self.close(0x0a, "PROTOCOL_VIOLATION: frame type not allowed in 0-RTT", application=False)
                 return
@@ -847,12 +787,11 @@ class QUICConnection:
                     self.max_uni_streams = max(self.max_uni_streams or 0, f.maximum)
 
             elif ftype is frames.NewConnectionId:
-                self._on_new_connection_id(f)
+                self.on_new_connection_id(f)
                 if self.terminated:
                     return
 
             elif ftype is frames.RetireConnectionId:
-                # The peer is retiring one of our CIDs (RFC 9000 §19.16).
                 if f.sequence_number >= self.next_cid_seq:
                     self.close(0x0a, "RETIRE_CONNECTION_ID references unissued sequence number", application=False)
                     return
@@ -902,9 +841,6 @@ class QUICConnection:
 
         stream = self.ensure_stream(f.stream_id)
 
-        # RFC 9000 §4.1: enforce the flow control limits we advertised. A peer
-        # that sends data beyond the stream or connection limit is a
-        # FLOW_CONTROL_ERROR.
         new_end = f.offset + len(f.data)
         if new_end > stream.recv_highest_offset:
             if new_end > stream.max_stream_data_local:
@@ -927,29 +863,26 @@ class QUICConnection:
         if chunk or finished:
             self._events.append(StreamDataReceived(f.stream_id, chunk, finished))
 
-        # RFC 9000 §4: replenish flow control credit as data is consumed so the
-        # peer is not stalled at the initial limit.
-        self._extend_stream_credit(stream)
-        self._extend_connection_credit()
+        self.extend_stream_credit(stream)
+        self.extend_connection_credit()
 
-    def _extend_stream_credit(self, stream: Stream):
+    def extend_stream_credit(self, stream: Stream):
         window = DEFAULT_MAX_STREAM_DATA
         if stream.max_stream_data_local - stream.receiver.consumed < window // 2:
             stream.max_stream_data_local = stream.receiver.consumed + window
             stream.max_stream_data_pending = True
 
-    def _extend_connection_credit(self):
+    def extend_connection_credit(self):
         window = DEFAULT_MAX_DATA
         total_consumed = sum(s.receiver.consumed for s in self.streams.values())
         if self.max_data_local - total_consumed < window // 2:
             self.max_data_local = total_consumed + window
             self.max_data_pending = True
 
-    def _issue_connection_ids(self):
-        # RFC 9000 §5.1.1: provide the peer with spare connection IDs up to the
-        # active_connection_id_limit it advertised.
+    def issue_connection_ids(self):
         if self.cids_issued or not self.peer_transport_params:
             return
+
         limit = max(1, min(int(self.peer_transport_params.get(TP_ACTIVE_CONNECTION_ID_LIMIT, 2) or 2), 8))
         while self.next_cid_seq < limit:
             seq = self.next_cid_seq
@@ -959,10 +892,10 @@ class QUICConnection:
             self.local_cid_info[seq] = (cid, token)
             self.new_cids_pending.append((seq, cid, token))
             self.next_cid_seq += 1
+
         self.cids_issued = True
 
-    def _on_new_connection_id(self, f: frames.NewConnectionId):
-        # RFC 9000 §19.15.
+    def on_new_connection_id(self, f: frames.NewConnectionId):
         if f.retire_prior_to > f.sequence_number:
             self.close(0x07, "NEW_CONNECTION_ID: retire_prior_to exceeds sequence_number", application=False)
             return
@@ -998,26 +931,30 @@ class QUICConnection:
                 if kind == "crypto":
                     _, level, off, length = item
                     self.crypto_send[level].on_loss(off, length, False)
+
                 elif kind == "stream":
                     _, sid, off, length, fin = item
                     st = self.streams.get(sid)
                     if st is not None:
                         st.sender.on_loss(off, length, fin)
+
                 elif kind == "max_data":
                     self.max_data_pending = True
+
                 elif kind == "max_stream_data":
                     st = self.streams.get(item[1])
                     if st is not None:
                         st.max_stream_data_pending = True
+
                 elif kind == "new_cid":
                     _, seq, cid, token = item
                     if seq in self.local_cid_seqs:
                         self.new_cids_pending.append((seq, cid, token))
+
                 elif kind == "retire_cid":
                     self.retire_cids_pending.append(item[1])
 
     def handle_retry(self, hdr, data: bytes, offset: int) -> None:
-        # RFC 9000 §17.2.5: a client accepts at most one Retry.
         if self.retry_source_cid is not None:
             return
 
@@ -1042,9 +979,6 @@ class QUICConnection:
         self.send_keys[LEVEL_INITIAL] = ck
         self.recv_keys[LEVEL_INITIAL] = sk
         self.remote_cid = new_dcid
-        # Send the retried Initial to the Retry's Source CID, but allow the
-        # server's chosen connection ID (the SCID in its first packet) to be
-        # adopted afterwards.
         self.remote_cid_set = False
 
         initial_space = self.recovery.spaces[SPACE_INITIAL]
@@ -1067,9 +1001,6 @@ class QUICConnection:
         self.needs_advance = True
 
     def datagrams_to_send(self, now: float) -> list[tuple[bytes, int]]:
-        # Once terminated, only an endpoint that initiated the close still has a
-        # CONNECTION_CLOSE to emit. In the draining state (peer-initiated close)
-        # or after an idle timeout, an endpoint MUST NOT send (RFC 9000 §10.2).
         if self.terminated and (self.close_sent or self.close_pending is None):
             return []
         self.run_handshake()
@@ -1135,13 +1066,9 @@ class QUICConnection:
         sent_frames: list = []
         ack_eliciting = False
 
-        # ACK frames are not allowed in 0-RTT packets (RFC 9000 §12.5).
         if level != LEVEL_EARLY and self.ack_needed[space] and self.recv_pns[space]:
             ranges = frames.ranges_from_set(self.recv_pns[space])
 
-            # ACK Delay is the time since the largest acked packet arrived,
-            # scaled by our ack_delay_exponent (default 3, as we do not send the
-            # ack_delay_exponent transport parameter). RFC 9000 §13.2.5, §19.3.
             recv_time = self.largest_recv_time.get(space)
             delay = max(0, int((now - recv_time) * 1_000_000)) >> 3 if recv_time is not None else 0
 
@@ -1150,7 +1077,6 @@ class QUICConnection:
             payload += ack.encode()
             self.ack_needed[space] = False
 
-        # CONNECTION_CLOSE is not allowed in 0-RTT packets (RFC 9000 §12.5).
         if self.close_pending is not None and level != LEVEL_EARLY:
             close_frame = self.close_pending
 
@@ -1162,23 +1088,22 @@ class QUICConnection:
             self.close_sent = True
 
         budget = max_len - len(payload) - 64
-        # LEVEL_EARLY has no CRYPTO data; crypto_send does not hold a key for it.
         crypto = self.crypto_send.get(level)
         if crypto is not None:
             while budget > 16 and crypto.has_data_to_send(1 << 62):
                 frame = crypto.get_frame(min(budget, 1100), 1 << 62)
                 if frame is None:
                     break
+
                 off, cdata, _ = frame
                 if not cdata:
                     break
+
                 payload += frames.Crypto(off, cdata).encode()
                 sent_frames.append(("crypto", level, off, len(cdata)))
                 ack_eliciting = True
                 budget = max_len - len(payload) - 64
 
-        # Stream data and flow-control frames are permitted in both 0-RTT
-        # (LEVEL_EARLY) and 1-RTT (LEVEL_APPLICATION) packets.
         if level in (LEVEL_EARLY, LEVEL_APPLICATION) and self.close_pending is None:
             if level == LEVEL_APPLICATION:
                 if self.path_response_pending is not None:
@@ -1212,7 +1137,6 @@ class QUICConnection:
                 sent_frames.append(("max_data",))
                 ack_eliciting = True
 
-            # Connection ID management (RFC 9000 §5.1).
             while self.new_cids_pending and max_len - len(payload) > 48:
                 seq, cid, token = self.new_cids_pending.pop(0)
                 payload += frames.NewConnectionId(seq, 0, cid, token).encode()
@@ -1225,16 +1149,17 @@ class QUICConnection:
                 sent_frames.append(("retire_cid", seq))
                 ack_eliciting = True
 
-            # Unreliable DATAGRAM frames (RFC 9221): sent best-effort, never
-            # retransmitted on loss, so they are not added to sent_frames.
             sent_count = 0
             for data in self.datagrams_pending:
                 encoded = frames.Datagram(data).encode()
+
                 if len(encoded) > max_len - len(payload) - 16:
                     break
+
                 payload += encoded
                 ack_eliciting = True
                 sent_count += 1
+
             if sent_count:
                 del self.datagrams_pending[:sent_count]
 
@@ -1266,10 +1191,7 @@ class QUICConnection:
                         self.data_blocked_pending = True
                         break
 
-                    frame = stream.sender.get_frame(
-                        min(budget, 1100, max(1, avail_cwnd), conn_remaining),
-                        max_offset,
-                    )
+                    frame = stream.sender.get_frame(min(budget, 1100, max(1, avail_cwnd), conn_remaining), max_offset)
                     if frame is None:
                         break
 
@@ -1280,10 +1202,7 @@ class QUICConnection:
                     ack_eliciting = True
                     budget = max_len - len(payload) - 32
 
-                if (budget > 16
-                        and stream.sender.has_data_to_send(1 << 62)
-                        and not stream.sender.has_data_to_send(max_offset)
-                        and stream.data_blocked_sent_at != max_offset):
+                if (budget > 16 and stream.sender.has_data_to_send(1 << 62) and not stream.sender.has_data_to_send(max_offset) and stream.data_blocked_sent_at != max_offset):
                     payload += frames.StreamDataBlocked(stream.stream_id, max_offset).encode()
                     stream.data_blocked_sent_at = max_offset
                     ack_eliciting = True
@@ -1311,7 +1230,7 @@ class QUICConnection:
             ptype = {
                 LEVEL_INITIAL: packet.PACKET_TYPE_INITIAL,
                 LEVEL_EARLY: packet.PACKET_TYPE_0RTT,
-                LEVEL_HANDSHAKE: packet.PACKET_TYPE_HANDSHAKE,
+                LEVEL_HANDSHAKE: packet.PACKET_TYPE_HANDSHAKE
             }[level]
             token = self.retry_token if level == LEVEL_INITIAL else b""
             prefix, first = packet.serialize_long_header_prefix(ptype, packet.QUIC_VERSION_1, self.remote_cid, self.local_cid, token, pn_len, payload_len)
@@ -1325,9 +1244,7 @@ class QUICConnection:
 
         self.recovery.on_packet_sent(SentPacket(pn, space, now, ack_eliciting, ack_eliciting, len(buf), sent_frames))
 
-        # RFC 9000 §10.1: restart the idle timer when sending the first
-        # ack-eliciting packet since the last packet was received.
-        if ack_eliciting and not self.ack_eliciting_since_recv and self._effective_idle_timeout() is not None:
+        if ack_eliciting and not self.ack_eliciting_since_recv and self.effective_idle_timeout() is not None:
             self.idle_base = now
             self.ack_eliciting_since_recv = True
 
@@ -1348,14 +1265,14 @@ class QUICConnection:
         for i in range(pn_len):
             buf[pn_offset + i] ^= mask[1 + i]
 
-    def _effective_idle_timeout(self) -> float | None:
+    def effective_idle_timeout(self) -> float | None:
         local = self.local_max_idle / 1000.0 if self.local_max_idle else 0.0
         peer = self.peer_max_idle / 1000.0 if self.peer_max_idle else 0.0
         candidates = [v for v in (local, peer) if v > 0]
         return min(candidates) if candidates else None
 
     def idle_deadline(self) -> float | None:
-        timeout = self._effective_idle_timeout()
+        timeout = self.effective_idle_timeout()
         if timeout is None or self.idle_base is None:
             return None
         # RFC 9000 §10.1: the connection is not timed out earlier than 3 PTOs.

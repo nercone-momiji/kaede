@@ -4,6 +4,13 @@ from dataclasses import dataclass, field
 
 from .crypto import LEVEL_INITIAL, LEVEL_EARLY, LEVEL_HANDSHAKE, LEVEL_APPLICATION
 
+K_PACKET_THRESHOLD = 3
+K_TIME_THRESHOLD = 9 / 8
+K_GRANULARITY = 0.001
+K_INITIAL_RTT = 0.333
+K_LOSS_REDUCTION_FACTOR = 0.5
+K_PERSISTENT_CONGESTION_THRESHOLD = 3
+
 SPACE_INITIAL = 0
 SPACE_HANDSHAKE = 1
 SPACE_APPLICATION = 2
@@ -12,15 +19,8 @@ LEVEL_TO_SPACE = {
     LEVEL_INITIAL: SPACE_INITIAL,
     LEVEL_HANDSHAKE: SPACE_HANDSHAKE,
     LEVEL_EARLY: SPACE_APPLICATION,
-    LEVEL_APPLICATION: SPACE_APPLICATION,
+    LEVEL_APPLICATION: SPACE_APPLICATION
 }
-
-K_PACKET_THRESHOLD = 3
-K_TIME_THRESHOLD = 9 / 8
-K_GRANULARITY = 0.001
-K_INITIAL_RTT = 0.333
-K_LOSS_REDUCTION_FACTOR = 0.5
-K_PERSISTENT_CONGESTION_THRESHOLD = 3
 
 def level_to_space(level: int) -> int:
     return LEVEL_TO_SPACE[level]
@@ -108,15 +108,18 @@ class Recovery:
     def update_rtt(self, latest_rtt: float, ack_delay: float, peer_max_ack_delay: float = 0.025):
         self.latest_rtt = latest_rtt
         self.min_rtt = min(self.min_rtt, latest_rtt)
+
         if not self.have_rtt:
             self.have_rtt = True
             self.smoothed_rtt = latest_rtt
             self.rtt_variance = latest_rtt / 2
             return
+
         ack_delay = min(ack_delay, peer_max_ack_delay)
         adjusted = latest_rtt
         if latest_rtt > self.min_rtt + ack_delay:
             adjusted = latest_rtt - ack_delay
+
         self.rtt_variance = 0.75 * self.rtt_variance + 0.25 * abs(self.smoothed_rtt - adjusted)
         self.smoothed_rtt = 0.875 * self.smoothed_rtt + 0.125 * adjusted
 
@@ -158,22 +161,24 @@ class Recovery:
     def on_packet_acked(self, pkt: SentPacket, now: float):
         if not pkt.in_flight:
             return
+
         if self.in_congestion_recovery(pkt.time_sent):
             return
+
         if self.ssthresh is None or self.congestion_window < self.ssthresh:
-            self.congestion_window += pkt.sent_bytes  # slow start
+            self.congestion_window += pkt.sent_bytes
+
         else:
             self.congestion_window += self.max_datagram_size * pkt.sent_bytes // max(self.congestion_window, 1)
 
-    def _check_persistent_congestion(self, lost: list[SentPacket]) -> bool:
+    def check_persistent_congestion(self, lost: list[SentPacket]) -> bool:
         if not self.have_rtt:
             return False
-        ack_eliciting = sorted(
-            [p for p in lost if p.ack_eliciting],
-            key=lambda p: p.time_sent,
-        )
+
+        ack_eliciting = sorted([p for p in lost if p.ack_eliciting], key=lambda p: p.time_sent)
         if len(ack_eliciting) < 2:
             return False
+
         span = ack_eliciting[-1].time_sent - ack_eliciting[0].time_sent
         pc_duration = self.pto(self.peer_max_ack_delay) * K_PERSISTENT_CONGESTION_THRESHOLD
         return span >= pc_duration
@@ -186,7 +191,7 @@ class Recovery:
         self.ssthresh = max(int(self.congestion_window * K_LOSS_REDUCTION_FACTOR), self.minimum_window)
         self.congestion_window = self.ssthresh
 
-        if self._check_persistent_congestion(lost):
+        if self.check_persistent_congestion(lost):
             self.congestion_window = self.minimum_window
             self.ssthresh = self.minimum_window
 
@@ -211,11 +216,13 @@ class Recovery:
         for space_id, space in self.spaces.items():
             if space.time_of_last_ack_eliciting is None:
                 continue
+
             mad = peer_max_ack_delay if space_id == SPACE_APPLICATION else 0.0
             pto = self.pto(mad) * (2 ** self.pto_count)
             candidate = space.time_of_last_ack_eliciting + pto
             if best is None or candidate < best:
                 best = candidate
+
         return best
 
     def on_timeout(self, now: float) -> list[SentPacket]:
@@ -224,6 +231,7 @@ class Recovery:
             out: list[SentPacket] = []
             for space_id in self.spaces:
                 out.extend(self.detect_lost_packets(space_id, now))
+
             return out
 
         self.pto_count += 1
@@ -233,4 +241,5 @@ class Recovery:
             if eliciting:
                 eliciting.sort(key=lambda p: p.packet_number)
                 probes.extend(eliciting[:2])
+
         return probes

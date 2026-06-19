@@ -28,9 +28,9 @@ FRAME_MAX_PUSH_ID = 0xD
 STREAM_CONTROL = 0x00
 STREAM_PUSH = 0x01
 STREAM_QPACK_ENCODER = 0x02
-STREAM_QPACK_DECODER = 0x03
+STREAMqpack_decoder = 0x03
 
-SETTINGS_QPACK_MAX_TABLE_CAPACITY = 0x01
+SETTINGS_QPACK_MAXtable_CAPACITY = 0x01
 SETTINGS_MAX_FIELD_SECTION_SIZE = 0x06
 SETTINGS_QPACK_BLOCKED_STREAMS = 0x07
 SETTINGS_ENABLE_CONNECT_PROTOCOL = 0x08
@@ -48,9 +48,6 @@ class H3WSUpgrade:
     request: object
 
 class H3WebSocketTransport:
-    """Adapts a WebSocket to an HTTP/3 request stream: WebSocket frames are
-    carried as the payload of HTTP/3 DATA frames (RFC 9220)."""
-
     def __init__(self, conn: "H3Connection", stream_id: int):
         self.conn = conn
         self.stream_id = stream_id
@@ -87,14 +84,14 @@ class H3:
         return encode_uint_var(frame_type) + encode_uint_var(len(payload)) + payload
 
     @staticmethod
-    def encode_settings(qpack_max_table_capacity: int = 0) -> bytes:
+    def encode_settings(qpack_maxtable_capacity: int = 0) -> bytes:
         body = bytearray()
 
         for ident, value in (
-            (SETTINGS_QPACK_MAX_TABLE_CAPACITY, qpack_max_table_capacity),
+            (SETTINGS_QPACK_MAXtable_CAPACITY, qpack_maxtable_capacity),
             (SETTINGS_QPACK_BLOCKED_STREAMS, 0),
             (SETTINGS_ENABLE_CONNECT_PROTOCOL, 1),
-            (0x21, 0),
+            (0x21, 0)
         ):
             body += encode_uint_var(ident)
             body += encode_uint_var(value)
@@ -132,25 +129,29 @@ class H3:
 
     @staticmethod
     def build_websocket_connect_headers(request: Request, authority: str, subprotocols: list[str] | None = None) -> list[tuple[bytes, bytes]]:
-        # Extended CONNECT for WebSocket over HTTP/3 (RFC 9220 / RFC 8441 §5).
         headers: list[tuple[bytes, bytes]] = [
             (b":method", b"CONNECT"),
             (b":protocol", b"websocket"),
             (b":scheme", request.scheme.encode("ascii")),
             (b":authority", authority.encode("ascii")),
             (b":path", request.target.encode("utf-8")),
-            (b"sec-websocket-version", b"13"),
+            (b"sec-websocket-version", b"13")
         ]
+
         if subprotocols:
             headers.append((b"sec-websocket-protocol", ", ".join(subprotocols).encode("ascii")))
 
         for name, value in request.headers.items():
             lname = name.lower()
+
             if lname in H3_FORBIDDEN_HEADERS or lname in ("host", "content-length") or lname.startswith("sec-websocket"):
                 continue
+
             if any(c in lname for c in "\r\n\x00") or any(c in value for c in "\r\n\x00"):
                 continue
+
             headers.append((lname.encode("ascii"), value.encode("utf-8")))
+
         return headers
 
 class RequestAssembler:
@@ -159,7 +160,7 @@ class RequestAssembler:
         self.body = bytearray()
         self.too_large = False
 
-QPACK_MAX_TABLE_CAPACITY = 4096
+QPACK_MAXtable_CAPACITY = 4096
 
 class H3Connection:
     def __init__(self, quic: QUICConnection, protocol, is_client: bool = False, *, addr=None, authority: str = ""):
@@ -174,14 +175,14 @@ class H3Connection:
 
         # H3 framing state
         self.control_stream_id: int | None = None
-        self._qpack_dec_stream_id: int | None = None
-        self._qpack_decoder: qpack.QpackDecoder = qpack.QpackDecoder(QPACK_MAX_TABLE_CAPACITY)
+        self.qpack_dec_stream_id: int | None = None
+        self.qpack_decoder: qpack.QpackDecoder = qpack.QpackDecoder(QPACK_MAXtable_CAPACITY)
         self.peer_uni_types: dict[int, int] = {}
         self.uni_buffers: dict[int, bytearray] = {}
         self.request_buffers: dict[int, bytearray] = {}
         self.finished: set[int] = set()
 
-        # Peer control stream state (RFC 9114 §6.2.1)
+        # Peer control stream state
         self.peer_control_stream_id: int | None = None
         self.peer_settings_received: bool = False
         self.peer_max_field_section_size: int | None = None
@@ -192,7 +193,6 @@ class H3Connection:
         self.tls = None
         self.assemblers: dict[int, RequestAssembler] = {}
         self.last_processed_stream_id: int = -1
-        # Extended-CONNECT WebSocket streams (RFC 9220): stream_id -> data queue.
         self.websocket_streams: dict[int, asyncio.Queue] = {}
 
         # client state
@@ -217,18 +217,14 @@ class H3Connection:
 
     def setup(self):
         self.control_stream_id = self.quic.get_next_available_stream_id(is_bidi=False)
-        self.quic.send_stream_data(
-            self.control_stream_id,
-            encode_uint_var(STREAM_CONTROL) + H3.encode_settings(QPACK_MAX_TABLE_CAPACITY),
-            end_stream=False,
-        )
+        self.quic.send_stream_data(self.control_stream_id, encode_uint_var(STREAM_CONTROL) + H3.encode_settings(QPACK_MAXtable_CAPACITY), end_stream=False)
 
         enc = self.quic.get_next_available_stream_id(is_bidi=False)
         self.quic.send_stream_data(enc, encode_uint_var(STREAM_QPACK_ENCODER), end_stream=False)
 
         dec = self.quic.get_next_available_stream_id(is_bidi=False)
-        self.quic.send_stream_data(dec, encode_uint_var(STREAM_QPACK_DECODER), end_stream=False)
-        self._qpack_dec_stream_id = dec
+        self.quic.send_stream_data(dec, encode_uint_var(STREAMqpack_decoder), end_stream=False)
+        self.qpack_dec_stream_id = dec
 
     def open_request_stream(self) -> int:
         return self.quic.get_next_available_stream_id(is_bidi=True)
@@ -283,20 +279,24 @@ class H3Connection:
 
         if stream_type == STREAM_CONTROL:
             self.parse_control_stream(sid, buf)
+
         elif stream_type == STREAM_QPACK_ENCODER:
             if buf:
                 try:
-                    self._qpack_decoder.feed_encoder_stream(bytes(buf))
+                    self.qpack_decoder.feed_encoder_stream(bytes(buf))
                 except qpack.QpackError:
                     self.quic.close(0x0200, "QPACK decompression failed")
                     return
+
                 del buf[:]
+
         elif len(buf) > 65536:
             del self.uni_buffers[sid]
 
     def parse_control_stream(self, sid: int, buf: bytearray):
         while True:
             reader = Buffer(bytes(buf))
+
             try:
                 frame_type = reader.pull_uint_var()
                 length = reader.pull_uint_var()
@@ -325,6 +325,7 @@ class H3Connection:
     def apply_peer_settings(self, payload: bytes):
         reader = Buffer(payload)
         seen_ids: set[int] = set()
+
         while not reader.eof():
             try:
                 ident = reader.pull_uint_var()
@@ -344,6 +345,7 @@ class H3Connection:
 
             if ident == SETTINGS_MAX_FIELD_SECTION_SIZE:
                 self.peer_max_field_section_size = value
+
             elif ident == SETTINGS_ENABLE_CONNECT_PROTOCOL:
                 self.peer_enable_connect = (value == 1)
 
@@ -384,10 +386,11 @@ class H3Connection:
 
             if frame_type == FRAME_HEADERS:
                 try:
-                    headers = self._qpack_decoder.decode_field_section(payload, stream_id=sid)
+                    headers = self.qpack_decoder.decode_field_section(payload, stream_id=sid)
                 except qpack.QpackError:
                     self.quic.close(0x0200, "QPACK decompression failed")
                     return
+
                 out.append(HeadersReceived(sid, headers, stream_ended=False))
 
             elif frame_type == FRAME_DATA:
@@ -435,11 +438,10 @@ class H3Connection:
         return terminated
 
     def flush(self):
-        # Send any pending QPACK decoder-stream instructions (ICI, Section Ack).
-        if self._qpack_dec_stream_id is not None:
-            pending = self._qpack_decoder.flush_decoder_instructions()
+        if self.qpack_dec_stream_id is not None:
+            pending = self.qpack_decoder.flush_decoder_instructions()
             if pending:
-                self.quic.send_stream_data(self._qpack_dec_stream_id, pending, end_stream=False)
+                self.quic.send_stream_data(self.qpack_dec_stream_id, pending, end_stream=False)
 
         now = self.now()
         for data, _ in self.quic.datagrams_to_send(now):
@@ -465,8 +467,6 @@ class H3Connection:
         self.timer = None
         self.quic.handle_timer(self.now())
 
-        # handle_timer may silently terminate the connection (idle timeout,
-        # RFC 9000 §10.1); surface that and reap server-side connection state.
         terminated = any(isinstance(event, ConnectionTerminated) for event in self.quic.events())
 
         self.flush()
@@ -479,15 +479,14 @@ class H3Connection:
 
     def on_server_event(self, ev):
         if isinstance(ev, HeadersReceived):
-            # RFC 9220 / RFC 8441: an extended CONNECT request (":protocol" =
-            # "websocket") bootstraps a WebSocket on this stream rather than a
-            # normal request; the stream stays open for bidirectional data.
-            if ev.stream_id not in self.websocket_streams and self._is_websocket_connect(ev.headers):
-                request = self._build_websocket_request(ev.stream_id, ev.headers)
+            if ev.stream_id not in self.websocket_streams and self.is_websocket_connect(ev.headers):
+                request = self.build_websocket_request(ev.stream_id, ev.headers)
+
                 if request is None:
                     self.send_headers(ev.stream_id, [(b":status", b"400")], end_stream=True)
                     self.flush()
                     return
+
                 self.websocket_streams[ev.stream_id] = asyncio.Queue()
                 self.handler.create_task(self.websocket_respond(ev.stream_id, request))
                 return
@@ -606,7 +605,7 @@ class H3Connection:
 
         return Request(client=self.client, scheme=scheme, secure=True, protocol="HTTP/3.0", method=method, target=target or "/", headers=headers, body=body, h2=None, h3=H3Info(connection_id=self.quic.local_cid, stream_id=stream_id), tls=self.tls)
 
-    def _is_websocket_connect(self, raw_headers) -> bool:
+    def is_websocket_connect(self, raw_headers) -> bool:
         method = protocol = None
         for nameb, valueb in raw_headers:
             name = nameb.decode("ascii", "replace") if isinstance(nameb, (bytes, bytearray)) else nameb
@@ -617,7 +616,7 @@ class H3Connection:
                 protocol = value
         return method == "CONNECT" and protocol == "websocket"
 
-    def _build_websocket_request(self, stream_id: int, raw_headers) -> Request | None:
+    def build_websocket_request(self, stream_id: int, raw_headers) -> Request | None:
         authority = ""
         scheme: str | None = None
         target: str | None = None
@@ -642,7 +641,6 @@ class H3Connection:
             elif not name.startswith(":"):
                 headers.append(name, value)
 
-        # RFC 8441 §4: an extended CONNECT must carry :scheme and :path.
         if not authority or not has_scheme or not has_path or scheme not in ("http", "https"):
             return None
 
@@ -881,7 +879,6 @@ class H3Connection:
             raise
 
     async def open_websocket(self, request: Request, *, subprotocols: list[str] | None = None) -> WebSocket:
-        # Client-side WebSocket over HTTP/3 via extended CONNECT (RFC 9220).
         stream_id = self.open_request_stream()
         headers = H3.build_websocket_connect_headers(request, self.authority, subprotocols)
 
@@ -940,7 +937,7 @@ class H3Protocol(asyncio.DatagramProtocol):
         self.quic_tls_context = quic_tls_context
         self.connections_per_ip: dict[str, int] = {}
         self.max_connections_per_ip = max_connections_per_ip
-        self.retry_secret = os.urandom(32)  # per-process key for stateless Retry tokens
+        self.retry_secret = os.urandom(32)
 
     def connection_made(self, transport):
         self.transport = transport
@@ -980,13 +977,13 @@ class H3Protocol(asyncio.DatagramProtocol):
             if self.connections_per_ip.get(ip, 0) >= self.max_connections_per_ip:
                 return
 
-            # Optional address validation via Retry (RFC 9000 §8.1).
             retry_enabled = self.handler is not None and getattr(self.handler.config, "quic_retry", False)
             if retry_enabled:
                 try:
                     hdr = parse_long_header(data, 0)
                 except Exception:
                     return
+
                 if not hdr.token:
                     try:
                         retry = QUICConnection.create_retry(data, self.retry_secret)
@@ -1010,9 +1007,9 @@ class H3Protocol(asyncio.DatagramProtocol):
             self.connections_per_ip[ip] = self.connections_per_ip.get(ip, 0) + 1
 
         if conn.receive_datagram(data):
-            self._reap(addr)
+            self.reap(addr)
 
-    def _reap(self, addr):
+    def reap(self, addr):
         if self.connections.pop(addr, None) is None:
             return
 

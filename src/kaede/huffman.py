@@ -1,4 +1,4 @@
-HUFFMAN_TABLE: list[tuple[int, int]] = [
+HUFFMANtable: list[tuple[int, int]] = [
     (0x1ff8, 13), (0x7fffd8, 23), (0xfffffe2, 28), (0xfffffe3, 28),  # 0, 1, 2, 3
     (0xfffffe4, 28), (0xfffffe5, 28), (0xfffffe6, 28), (0xfffffe7, 28),  # 4, 5, 6, 7
     (0xfffffe8, 28), (0xffffea, 24), (0x3ffffffc, 30), (0xfffffe9, 28),  # 8, 9, 10, 11
@@ -66,27 +66,27 @@ HUFFMAN_TABLE: list[tuple[int, int]] = [
     (0x3fffffff, 30)  # 256 EOS
 ]
 
-def build_huffman_encode_table() -> dict[int, tuple[int, int]]:
+def build_huffman_encodetable() -> dict[int, tuple[int, int]]:
     table: dict[int, tuple[int, int]] = {}
-    for sym, (code, bits) in enumerate(HUFFMAN_TABLE):
+    for sym, (code, bits) in enumerate(HUFFMANtable):
         table[sym] = (code, bits)
     return table
 
-def build_huffman_decode_table() -> dict[tuple[int, int], int]:
+def build_huffman_decodetable() -> dict[tuple[int, int], int]:
     table: dict[tuple[int, int], int] = {}
-    for sym, (code, bits) in enumerate(HUFFMAN_TABLE):
+    for sym, (code, bits) in enumerate(HUFFMANtable):
         table[(code, bits)] = sym
     return table
 
-HUFFMAN_ENCODE_TABLE = build_huffman_encode_table()
-HUFFMAN_DECODE_TABLE = build_huffman_decode_table()
+HUFFMAN_ENCODEtable = build_huffman_encodetable()
+HUFFMAN_DECODEtable = build_huffman_decodetable()
 
 def huffman_encode(data: bytes) -> bytes:
     bits = 0
     total_bits = 0
 
     for byte in data:
-        code, length = HUFFMAN_ENCODE_TABLE[byte]
+        code, length = HUFFMAN_ENCODEtable[byte]
         bits = (bits << length) | code
         total_bits += length
 
@@ -114,7 +114,7 @@ def huffman_decode(data: bytes) -> bytes:
         if current_bits > 30:
             raise RuntimeError("code exceeds maximum length")
 
-        sym = HUFFMAN_DECODE_TABLE.get((current, current_bits))
+        sym = HUFFMAN_DECODEtable.get((current, current_bits))
 
         if sym is not None:
             if sym == 256:

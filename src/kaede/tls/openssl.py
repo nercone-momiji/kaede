@@ -41,14 +41,12 @@ SSL_TLSEXT_ERR_NOACK = 3
 
 BIO_CTRL_PENDING = 10
 
-# Session cache mode flags
 SSL_SESS_CACHE_OFF = 0x0000
 SSL_SESS_CACHE_CLIENT = 0x0001
 SSL_SESS_CACHE_SERVER = 0x0002
 SSL_SESS_CACHE_NO_AUTO_CLEAR = 0x0080
 SSL_CTRL_SET_SESS_CACHE_MODE = 44
 
-# Options (via SSL_CTX_ctrl)
 SSL_CTRL_OPTIONS = 32
 SSL_OP_NO_ANTI_REPLAY = 0x40000000
 
@@ -181,7 +179,6 @@ class OpenSSL:
             s.SSL_get0_group_name.restype = ctypes.c_char_p
             s.SSL_get0_group_name.argtypes = [VOID_P]
 
-        # Session management (0-RTT / resumption)
         s.SSL_get1_session.restype = VOID_P
         s.SSL_get1_session.argtypes = [VOID_P]
         s.SSL_set_session.restype = ctypes.c_int
@@ -199,17 +196,10 @@ class OpenSSL:
             s.SSL_CTX_set_recv_max_early_data.restype = ctypes.c_int
             s.SSL_CTX_set_recv_max_early_data.argtypes = [VOID_P, ctypes.c_uint32]
 
-        # QUIC-TLS-specific early data toggle (OpenSSL 3.5+).  The client calls
-        # this after SSL_set_session to signal that it wants to send 0-RTT data;
-        # doing so causes yield_secret to fire for LEVEL_EARLY WRITE immediately
-        # on the next SSL_do_handshake call.
         if hasattr(s, "SSL_set_quic_tls_early_data_enabled"):
             s.SSL_set_quic_tls_early_data_enabled.restype = ctypes.c_int
             s.SSL_set_quic_tls_early_data_enabled.argtypes = [VOID_P, ctypes.c_int]
 
-        # Keylog callback: the only way to obtain server-side LEVEL_EARLY READ
-        # key material from the OpenSSL 3.x external QUIC-TLS API (yield_secret
-        # never fires for server LEVEL_EARLY READ).
         s.SSL_CTX_set_keylog_callback.restype = None
         s.SSL_CTX_set_keylog_callback.argtypes = [VOID_P, VOID_P]
 
@@ -451,73 +441,64 @@ class OpenSSL:
         return name.decode("ascii", "replace") if name else None
 
     def enable_early_data(self, ctx: int) -> None:
-        """Enable session tickets with max_early_data=0xffffffff (RFC 9001 §4.6.1)."""
         if hasattr(self.ssl, "SSL_CTX_set_max_early_data"):
             self.ssl.SSL_CTX_set_max_early_data(ctx, 0xffffffff)
-        # Allow the server to actually accept early data on each connection.
-        # Without this, OpenSSL does not derive the early traffic secret even
-        # when the session ticket carries a non-zero max_early_data value.
+
         if hasattr(self.ssl, "SSL_CTX_set_recv_max_early_data"):
             self.ssl.SSL_CTX_set_recv_max_early_data(ctx, 0xffffffff)
-        # Disable built-in anti-replay; the QUIC layer handles replay protection
-        # at the connection level (single-use tokens).
+
         self.ssl.SSL_CTX_ctrl(ctx, SSL_CTRL_OPTIONS, SSL_OP_NO_ANTI_REPLAY, None)
 
     def enable_quic_early_data(self, ssl_ptr: int) -> None:
-        """Signal the SSL object to attempt 0-RTT early data sending (client side).
-
-        This uses the QUIC-TLS-specific ``SSL_set_quic_tls_early_data_enabled``
-        API (OpenSSL 3.5+).  When called after ``SSL_set_session``, the
-        ``yield_secret`` callback fires for ``LEVEL_EARLY`` direction ``WRITE``
-        on the first ``SSL_do_handshake``.
-        """
         if hasattr(self.ssl, "SSL_set_quic_tls_early_data_enabled"):
             self.ssl.SSL_set_quic_tls_early_data_enabled(ssl_ptr, 1)
 
     def enable_client_sessions(self, ctx: int) -> None:
-        """Enable client-side session caching so NewSessionTickets are retained."""
         self.ssl.SSL_CTX_ctrl(
             ctx, SSL_CTRL_SET_SESS_CACHE_MODE,
             SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_AUTO_CLEAR, None,
         )
 
     def serialize_session(self, ssl_ptr: int) -> bytes | None:
-        """Serialize the current SSL_SESSION to DER bytes for later resumption."""
         ssl = self.ssl
         sess = ssl.SSL_get1_session(ssl_ptr)
+
         if not sess:
             return None
+
         try:
-            # Two-call idiom: first call with NULL to get the DER length, then
-            # allocate a pointer for OpenSSL to fill.
             length = ssl.i2d_SSL_SESSION(sess, None)
             if length <= 0:
                 return None
+
             buf_p = VOID_P(None)
+
             length2 = ssl.i2d_SSL_SESSION(sess, ctypes.byref(buf_p))
             if length2 <= 0 or not buf_p.value:
                 return None
+
             try:
                 return bytes(ctypes.string_at(buf_p.value, length2))
             finally:
                 if hasattr(self.crypto, "OPENSSL_free") and buf_p.value:
                     self.crypto.OPENSSL_free(buf_p)
+
         finally:
             ssl.SSL_SESSION_free(sess)
 
     def deserialize_and_set_session(self, ssl_ptr: int, data: bytes) -> bool:
-        """Deserialize DER session bytes and install them on *ssl_ptr* for resumption."""
         ssl = self.ssl
         raw = ctypes.create_string_buffer(data, len(data))
         buf_p = ctypes.cast(raw, VOID_P)
         sess = ssl.d2i_SSL_SESSION(None, ctypes.byref(buf_p), len(data))
+
         if not sess:
             return False
+
         try:
             return bool(ssl.SSL_set_session(ssl_ptr, sess))
         finally:
             ssl.SSL_SESSION_free(sess)
-
 
 def alpn_wire(protocols: tuple[str, ...]) -> bytes:
     out = bytearray()

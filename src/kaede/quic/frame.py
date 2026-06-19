@@ -253,8 +253,6 @@ class Datagram:
     data: bytes
 
     def encode(self) -> bytes:
-        # Always use the length-prefixed form (0x31) so a DATAGRAM frame can be
-        # coalesced with other frames in a packet (RFC 9221 §4).
         return bytes([FRAME_DATAGRAM_LEN]) + encode_uint_var(len(self.data)) + self.data
 
 def pull_frame(buf: Buffer):

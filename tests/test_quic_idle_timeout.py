@@ -13,13 +13,13 @@ class TestEffectiveTimeout:
         conn = make_conn()
         conn.local_max_idle = 30000
         conn.peer_max_idle = 10000
-        assert conn._effective_idle_timeout() == 10.0
+        assert conn.effective_idle_timeout() == 10.0
 
     def test_disabled_when_both_zero(self):
         conn = make_conn()
         conn.local_max_idle = 0
         conn.peer_max_idle = 0
-        assert conn._effective_idle_timeout() is None
+        assert conn.effective_idle_timeout() is None
         assert conn.idle_deadline() is None
 
 class TestTermination:

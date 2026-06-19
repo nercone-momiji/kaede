@@ -73,67 +73,83 @@ class TLS:
         if context.is_client:
             ssl.SSL_set_connect_state(self.SSL)
             if server_name:
-                # RFC 6066 §3: SNI MUST NOT contain literal IP addresses
                 try:
                     ipaddress.ip_address(server_name)
                     is_ip = True
                 except ValueError:
                     is_ip = False
+
                 if not is_ip:
                     try:
                         self.sni = server_name.encode("idna")
                     except (UnicodeError, UnicodeDecodeError):
                         self.sni = server_name.encode("ascii")
+
                     ssl.SSL_ctrl(self.SSL, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, ctypes.cast(ctypes.c_char_p(self.sni), VOID_P))
+
                     if context.verify_hostname:
                         ssl.SSL_set1_host(self.SSL, self.sni)
+
         else:
             ssl.SSL_set_accept_state(self.SSL)
 
     def receive(self, data: bytes):
         if not data:
             return
+
         buf = (ctypes.c_char * len(data)).from_buffer_copy(data)
         offset = 0
+
         while offset < len(data):
             ret = self.lib.crypto.BIO_write(self.rbio, ctypes.cast(ctypes.byref(buf, offset), VOID_P), len(data) - offset)
+
             if ret <= 0:
                 raise TLSError("BIO_write into rbio failed")
+
             offset += ret
 
     def do_handshake(self) -> bool:
         ssl = self.lib.ssl
         ret = ssl.SSL_do_handshake(self.SSL)
+
         if ret == 1:
             self.handshake_complete = True
             return True
+
         err = ssl.SSL_get_error(self.SSL, ret)
         if err in (SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE):
             return False
+
         raise TLSError(f"TLS handshake failed (SSL_get_error={err}): {self.lib.errors()}")
 
     def read(self) -> bytes:
         ssl = self.lib.ssl
         out = bytearray()
         buf = ctypes.create_string_buffer(CHUNK)
+
         while True:
             ret = ssl.SSL_read(self.SSL, ctypes.cast(buf, VOID_P), CHUNK)
             if ret > 0:
                 out += buf.raw[:ret]
                 continue
+
             err = ssl.SSL_get_error(self.SSL, ret)
             if err in (SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE):
                 break
+
             self.closed = True
             break
+
         return bytes(out)
 
     def write(self, data: bytes):
         if not data:
             return
+
         ssl = self.lib.ssl
         buf = (ctypes.c_char * len(data)).from_buffer_copy(data)
         offset = 0
+
         while offset < len(data):
             ret = ssl.SSL_write(self.SSL, ctypes.cast(ctypes.byref(buf, offset), VOID_P), len(data) - offset)
 
@@ -155,11 +171,13 @@ class TLS:
         crypto = self.lib.crypto
         out = bytearray()
         buf = ctypes.create_string_buffer(CHUNK)
+
         while True:
             ret = crypto.BIO_read(self.wbio, ctypes.cast(buf, VOID_P), CHUNK)
             if ret <= 0:
                 break
             out += buf.raw[:ret]
+
         return bytes(out)
 
     def pending(self) -> int:
@@ -177,11 +195,13 @@ class TLS:
 
     def free(self):
         ssl_handle = getattr(self, "SSL", None)
+
         if ssl_handle is not None:
             try:
                 self.lib.ssl.SSL_free(ssl_handle)
             except Exception:
                 pass
+
             self.SSL = None
             self.rbio = None
             self.wbio = None

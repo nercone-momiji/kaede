@@ -2,103 +2,72 @@ from __future__ import annotations
 
 from ..huffman import huffman_decode
 
-# ---------------------------------------------------------------------------
-# QPACK Dynamic Table (RFC 9204 §3.2)
-# ---------------------------------------------------------------------------
-
 class DynamicTable:
-    """QPACK dynamic table – absolute-indexed, FIFO eviction (RFC 9204 §3.2)."""
-
-    OVERHEAD = 32  # per-entry overhead in bytes (§3.2.1)
+    OVERHEAD = 32
 
     def __init__(self, capacity: int = 0):
-        self._capacity = capacity
-        self._used = 0
-        self._entries: list[tuple[bytes, bytes]] = []  # oldest first
-        self._base = 0  # absolute index of _entries[0]
-
-    @property
-    def capacity(self) -> int:
-        return self._capacity
+        self.capacity = capacity
+        self.used = 0
+        self.entries: list[tuple[bytes, bytes]] = []
+        self.base = 0
 
     @property
     def insert_count(self) -> int:
-        return self._base + len(self._entries)
+        return self.base + len(self.entries)
 
     @property
     def max_entries(self) -> int:
-        """MaxEntries = floor(capacity / 32) used for RIC mod-encoding (§4.5.1.1)."""
-        return self._capacity // self.OVERHEAD
+        return self.capacity // self.OVERHEAD
 
     @staticmethod
-    def _entry_size(name: bytes, value: bytes) -> int:
+    def entry_size(name: bytes, value: bytes) -> int:
         return len(name) + len(value) + DynamicTable.OVERHEAD
 
-    def set_capacity(self, cap: int) -> None:
-        self._capacity = cap
-        self._evict()
+    def set_capacity(self, capacity: int) -> None:
+        self.capacity = capacity
+        self.evict()
 
-    def _evict(self) -> None:
-        while self._used > self._capacity and self._entries:
-            n, v = self._entries.pop(0)
-            self._used -= self._entry_size(n, v)
-            self._base += 1
+    def evict(self) -> None:
+        while self.used > self.capacity and self.entries:
+            n, v = self.entries.pop(0)
+            self.used -= self.entry_size(n, v)
+            self.base += 1
 
     def insert(self, name: bytes, value: bytes) -> int:
-        """Insert an entry; evict oldest entries as needed. Returns absolute index."""
-        sz = self._entry_size(name, value)
-        if sz > self._capacity:
-            raise QpackError(f"dynamic table entry ({sz} bytes) exceeds capacity ({self._capacity})")
-        while self._used + sz > self._capacity and self._entries:
-            n, v = self._entries.pop(0)
-            self._used -= self._entry_size(n, v)
-            self._base += 1
-        self._entries.append((name, value))
-        self._used += sz
-        return self._base + len(self._entries) - 1
+        size = self.entry_size(name, value)
+        if size > self.capacity:
+            raise QpackError(f"dynamic table entry ({size} bytes) exceeds capacity ({self.capacity})")
+
+        while self.used + size > self.capacity and self.entries:
+            n, v = self.entries.pop(0)
+            self.used -= self.entry_size(n, v)
+            self.base += 1
+
+        self.entries.append((name, value))
+        self.used += size
+        return self.base + len(self.entries) - 1
 
     def get(self, absolute: int) -> tuple[bytes, bytes]:
-        """Return the entry at the given absolute index or raise QpackError."""
-        rel = absolute - self._base
-        if rel < 0 or rel >= len(self._entries):
-            raise QpackError(f"dynamic table entry {absolute} not available (evicted or not yet inserted)")
-        return self._entries[rel]
+        rel = absolute - self.base
 
+        if rel < 0 or rel >= len(self.entries):
+            raise QpackError(f"dynamic table entry {absolute} not available (evicted or not yet inserted)")
+
+        return self.entries[rel]
 
 class QpackDecoder:
-    """Decoder-side QPACK state machine (RFC 9204).
-
-    Processes instructions received on the peer's encoder stream (stream type
-    0x02) and decodes field sections that may reference the dynamic table.
-    Produces decoder-stream instructions (Insert Count Increment, Section
-    Acknowledgment) to send back to the peer.
-    """
-
     DEFAULT_CAPACITY = 4096
 
     def __init__(self, max_capacity: int = DEFAULT_CAPACITY):
-        self._max_capacity = max_capacity
-        self._table = DynamicTable(capacity=0)
-        self._enc_buf: bytearray = bytearray()     # encoder stream receive buffer
-        self._dec_pending: bytearray = bytearray() # decoder stream instructions to send
-        self._ici_pending: int = 0                 # Insert Count Increments to send
-
-    @property
-    def insert_count(self) -> int:
-        return self._table.insert_count
-
-    @property
-    def max_table_capacity(self) -> int:
-        return self._max_capacity
-
-    # ------------------------------------------------------------------
-    # Encoder stream (RFC 9204 §3.2)
-    # ------------------------------------------------------------------
+        self.max_capacity = max_capacity
+        self.table = DynamicTable(capacity=0)
+        self.enc_buf: bytearray = bytearray()
+        self.dec_pending: bytearray = bytearray()
+        self.ici_pending: int = 0
 
     def feed_encoder_stream(self, data: bytes) -> None:
-        """Process bytes received on the peer's encoder stream (type 0x02)."""
-        self._enc_buf.extend(data)
-        buf = bytes(self._enc_buf)
+        self.enc_buf.extend(data)
+        buf = bytes(self.enc_buf)
         pos = 0
         inserted = 0
 
@@ -106,74 +75,62 @@ class QpackDecoder:
             first = buf[pos]
 
             if first & 0x80:
-                # Insert with Name Reference (§3.2.3): 1T idx[6+] value
                 is_static = bool(first & 0x40)
                 try:
                     idx, pos = decode_integer(buf, pos, 6)
                     value, pos = decode_string(buf, pos, 7)
                 except QpackError:
-                    break  # incomplete instruction; wait for more data
+                    break
 
                 if is_static:
-                    if idx >= len(STATIC_TABLE):
+                    if idx >= len(STATICtable):
                         raise QpackError(f"encoder stream: static index {idx} out of range")
-                    name = STATIC_TABLE[idx][0]
-                else:
-                    abs_idx = self._table.insert_count - 1 - idx
-                    name = self._table.get(abs_idx)[0]
 
-                self._table.insert(name, value)
+                    name = STATICtable[idx][0]
+                else:
+                    abs_idx = self.table.insert_count - 1 - idx
+                    name = self.table.get(abs_idx)[0]
+
+                self.table.insert(name, value)
                 inserted += 1
 
             elif first & 0x40:
-                # Insert with Literal Name (§3.2.4): 01H name[5+] value[7+]
                 try:
                     name, pos = decode_string(buf, pos, 5)
                     value, pos = decode_string(buf, pos, 7)
                 except QpackError:
                     break
 
-                self._table.insert(name.lower(), value)
+                self.table.insert(name.lower(), value)
                 inserted += 1
 
             elif first & 0x20:
-                # Set Dynamic Table Capacity (§3.2.1): 001 cap[5+]
                 try:
                     cap, pos = decode_integer(buf, pos, 5)
                 except QpackError:
                     break
 
-                if cap > self._max_capacity:
-                    raise QpackError(f"encoder requested capacity {cap} > our max {self._max_capacity}")
-                self._table.set_capacity(cap)
+                if cap > self.max_capacity:
+                    raise QpackError(f"encoder requested capacity {cap} > our max {self.max_capacity}")
+
+                self.table.set_capacity(cap)
 
             else:
-                # Duplicate (§3.2.5): 000 idx[5+]
                 try:
                     idx, pos = decode_integer(buf, pos, 5)
                 except QpackError:
                     break
 
-                abs_idx = self._table.insert_count - 1 - idx
-                entry = self._table.get(abs_idx)
-                self._table.insert(entry[0], entry[1])
+                abs_idx = self.table.insert_count - 1 - idx
+                entry = self.table.get(abs_idx)
+                self.table.insert(entry[0], entry[1])
                 inserted += 1
 
-        del self._enc_buf[:pos]
+        del self.enc_buf[:pos]
         if inserted > 0:
-            self._ici_pending += inserted
-
-    # ------------------------------------------------------------------
-    # Field section decoding (RFC 9204 §4.5)
-    # ------------------------------------------------------------------
+            self.ici_pending += inserted
 
     def decode_field_section(self, data: bytes, stream_id: int | None = None) -> list[tuple[bytes, bytes]]:
-        """Decode a HEADERS field section that may reference the dynamic table.
-
-        Sends a Section Acknowledgment on the decoder stream when *stream_id* is
-        given and the section contains dynamic table references (§4.4.1).
-        Raises *QpackError* on malformed input or blocked streams.
-        """
         if not data:
             return []
 
@@ -185,29 +142,31 @@ class QpackDecoder:
         s_bit = bool(data[offset] & 0x80)
         delta_base, offset = decode_integer(data, offset, 7)
 
-        # Decode Required Insert Count (§4.5.1.1)
         if enc_ric == 0:
             ric = 0
         else:
-            max_entries = self._table.max_entries
+            max_entries = self.table.max_entries
             if max_entries == 0:
                 raise QpackError("dynamic reference in field section but table capacity is 0")
+
             full_range = 2 * max_entries
             if enc_ric > full_range:
                 raise QpackError("encoded Required Insert Count out of range")
-            total = self._table.insert_count
+
+            total = self.table.insert_count
             max_value = total + max_entries
             max_wrapped = (max_value // full_range) * full_range
             ric = max_wrapped + enc_ric - 1
+
             if ric > max_value:
                 ric -= full_range
+
             if ric == 0 or ric > max_value:
                 raise QpackError("invalid Required Insert Count after decoding")
 
-        if ric > self._table.insert_count:
-            raise QpackError(f"QPACK blocked stream: RIC={ric} > insert_count={self._table.insert_count}")
+        if ric > self.table.insert_count:
+            raise QpackError(f"QPACK blocked stream: RIC={ric} > insert_count={self.table.insert_count}")
 
-        # Base (§4.5.1.2)
         if s_bit:
             base = ric - delta_base - 1
         else:
@@ -221,81 +180,73 @@ class QpackDecoder:
             first = data[offset]
 
             if first & 0x80:
-                # Indexed Field Line (§4.5.2): 1T idx[6+]
                 is_static = bool(first & 0x40)
                 idx, offset = decode_integer(data, offset, 6)
+
                 if is_static:
-                    if idx >= len(STATIC_TABLE):
+                    if idx >= len(STATICtable):
                         raise QpackError(f"static index {idx} out of range")
-                    headers.append(STATIC_TABLE[idx])
+
+                    headers.append(STATICtable[idx])
+
                 else:
                     abs_idx = base - 1 - idx
-                    headers.append(self._table.get(abs_idx))
+                    headers.append(self.table.get(abs_idx))
                     has_dynamic_ref = True
 
             elif first & 0x40:
-                # Literal Field Line with Name Reference (§4.5.4): 01NT idx[4+] value
                 is_static = bool(first & 0x10)
                 idx, offset = decode_integer(data, offset, 4)
                 value, offset = decode_string(data, offset, 7)
+
                 if is_static:
-                    if idx >= len(STATIC_TABLE):
+                    if idx >= len(STATICtable):
                         raise QpackError(f"static name-ref index {idx} out of range")
-                    name = STATIC_TABLE[idx][0]
+                    name = STATICtable[idx][0]
+
                 else:
                     abs_idx = base - 1 - idx
-                    name = self._table.get(abs_idx)[0]
+                    name = self.table.get(abs_idx)[0]
                     has_dynamic_ref = True
+
                 headers.append((name, value))
 
             elif first & 0x20:
-                # Literal Field Line with Literal Name (§4.5.6): 001NH name[3+] value
                 name, offset = decode_string(data, offset, 3)
                 value, offset = decode_string(data, offset, 7)
                 headers.append((name.lower(), value))
 
             elif first & 0x10:
-                # Indexed Field Line with Post-Base Index (§4.5.3): 0001 idx[4+]
                 idx, offset = decode_integer(data, offset, 4)
                 abs_idx = base + idx
-                headers.append(self._table.get(abs_idx))
+                headers.append(self.table.get(abs_idx))
                 has_dynamic_ref = True
 
             else:
-                # Literal Field Line with Post-Base Name Reference (§4.5.5): 0000N idx[3+] value
                 idx, offset = decode_integer(data, offset, 3)
                 value, offset = decode_string(data, offset, 7)
                 abs_idx = base + idx
-                name = self._table.get(abs_idx)[0]
+                name = self.table.get(abs_idx)[0]
                 has_dynamic_ref = True
                 headers.append((name, value))
 
         if has_dynamic_ref and stream_id is not None:
-            # Section Acknowledgment (§4.4.1): 1 stream_id[7+]
-            self._dec_pending += encode_integer(stream_id, 7, 0x80)
+            self.dec_pending += encode_integer(stream_id, 7, 0x80)
 
-        return [
-            (name, value) for name, value in headers
-            if b"\r" not in name and b"\n" not in name and b"\x00" not in name
-            and b"\r" not in value and b"\n" not in value and b"\x00" not in value
-        ]
-
-    # ------------------------------------------------------------------
-    # Decoder stream output (RFC 9204 §4.4)
-    # ------------------------------------------------------------------
+        return [(name, value) for name, value in headers if b"\r" not in name and b"\n" not in name and b"\x00" not in name and b"\r" not in value and b"\n" not in value and b"\x00" not in value]
 
     def flush_decoder_instructions(self) -> bytes:
-        """Return any pending decoder-stream instructions to send."""
         out = bytearray()
-        if self._ici_pending > 0:
-            # Insert Count Increment (§4.4.3): 00 increment[6+]
-            out += encode_integer(self._ici_pending, 6, 0x00)
-            self._ici_pending = 0
-        out += self._dec_pending
-        self._dec_pending = bytearray()
+
+        if self.ici_pending > 0:
+            out += encode_integer(self.ici_pending, 6, 0x00)
+            self.ici_pending = 0
+        out += self.dec_pending
+
+        self.dec_pending = bytearray()
         return bytes(out)
 
-STATIC_TABLE: list[tuple[bytes, bytes]] = [
+STATICtable: list[tuple[bytes, bytes]] = [
     (b":authority", b""),
     (b":path", b"/"),
     (b"age", b"0"),
@@ -400,7 +351,7 @@ STATIC_TABLE: list[tuple[bytes, bytes]] = [
 STATIC_INDEX_BY_HEADER: dict[tuple[bytes, bytes], int] = {}
 STATIC_INDEX_BY_NAME: dict[bytes, int] = {}
 
-for _i, (_n, _v) in enumerate(STATIC_TABLE):
+for _i, (_n, _v) in enumerate(STATICtable):
     STATIC_INDEX_BY_HEADER.setdefault((_n, _v), _i)
     STATIC_INDEX_BY_NAME.setdefault(_n, _i)
 
@@ -515,12 +466,6 @@ def encode_headers(headers: list[tuple[bytes, bytes]]) -> bytes:
     return bytes(out)
 
 def decode_headers(data: bytes) -> list[tuple[bytes, bytes]]:
-    """Decode a QPACK-encoded field section using the static table only.
-
-    Rejects any dynamic-table reference (Required Insert Count != 0 or dynamic
-    indexed/name-reference representations).  Use *QpackDecoder.decode_field_section*
-    when dynamic-table support is required.
-    """
     offset = 0
     required_insert_count, offset = decode_integer(data, offset, 8)
 
@@ -543,9 +488,9 @@ def decode_headers(data: bytes) -> list[tuple[bytes, bytes]]:
             if not is_static:
                 raise QpackError("dynamic table reference not supported")
 
-            if index >= len(STATIC_TABLE):
+            if index >= len(STATICtable):
                 raise QpackError(f"static table index out of range: {index}")
-            headers.append(STATIC_TABLE[index])
+            headers.append(STATICtable[index])
 
         elif first & 0x40:
             is_static = bool(first & 0x10)
@@ -554,9 +499,9 @@ def decode_headers(data: bytes) -> list[tuple[bytes, bytes]]:
             if not is_static:
                 raise QpackError("dynamic table reference not supported")
 
-            if index >= len(STATIC_TABLE):
+            if index >= len(STATICtable):
                 raise QpackError(f"static table index out of range: {index}")
-            name = STATIC_TABLE[index][0]
+            name = STATICtable[index][0]
             value, offset = decode_string(data, offset, 7)
             headers.append((name, value))
 

@@ -10,7 +10,7 @@ from kaede.http.qpack import (
     QpackDecoder,
     encode_integer,
     encode_string,
-    STATIC_TABLE,
+    STATICtable,
 )
 
 
@@ -151,7 +151,7 @@ class TestDynamicTable:
         with pytest.raises(QpackError):
             t.get(0)
 
-    def test_set_capacity_zero_clears_table(self):
+    def test_set_capacity_zero_clearstable(self):
         t = DynamicTable(capacity=4096)
         t.insert(b"a", b"b")
         t.set_capacity(0)
@@ -184,7 +184,7 @@ class TestEncoderStreamInstructions:
     def test_set_capacity(self):
         d = QpackDecoder(max_capacity=4096)
         d.feed_encoder_stream(_set_capacity(512))
-        assert d._table.capacity == 512
+        assert d.table.capacity == 512
 
     def test_set_capacity_above_max_raises(self):
         d = QpackDecoder(max_capacity=1024)
@@ -194,21 +194,21 @@ class TestEncoderStreamInstructions:
     def test_insert_literal_name(self):
         d = self._dec()
         d.feed_encoder_stream(_insert_literal(b"x-custom", b"hello"))
-        assert d.insert_count == 1
-        assert d._table.get(0) == (b"x-custom", b"hello")
+        assert d.table.insert_count == 1
+        assert d.table.get(0) == (b"x-custom", b"hello")
 
     def test_insert_literal_lowercases_name(self):
         d = self._dec()
         d.feed_encoder_stream(_insert_literal(b"X-Custom", b"Val"))
-        name, _ = d._table.get(0)
+        name, _ = d.table.get(0)
         assert name == b"x-custom"
 
     def test_insert_name_ref_static(self):
         d = self._dec()
         # Static index 17 = (:method, GET); insert with value "POST"
         d.feed_encoder_stream(_insert_name_ref_static(17, b"POST"))
-        assert d.insert_count == 1
-        name, value = d._table.get(0)
+        assert d.table.insert_count == 1
+        name, value = d.table.get(0)
         assert name == b":method"
         assert value == b"POST"
 
@@ -217,31 +217,31 @@ class TestEncoderStreamInstructions:
         d.feed_encoder_stream(_insert_literal(b"x-base", b"base"))  # abs 0
         # Dynamic relative index 0 = most recently inserted (abs 0)
         d.feed_encoder_stream(_insert_name_ref_dynamic(0, b"derived"))  # abs 1
-        assert d.insert_count == 2
-        assert d._table.get(1) == (b"x-base", b"derived")
+        assert d.table.insert_count == 2
+        assert d.table.get(1) == (b"x-base", b"derived")
 
     def test_duplicate(self):
         d = self._dec()
         d.feed_encoder_stream(_insert_literal(b"foo", b"bar"))  # abs 0
         d.feed_encoder_stream(_duplicate(0))                     # abs 1 (copy of 0)
-        assert d.insert_count == 2
-        assert d._table.get(0) == (b"foo", b"bar")
-        assert d._table.get(1) == (b"foo", b"bar")
+        assert d.table.insert_count == 2
+        assert d.table.get(0) == (b"foo", b"bar")
+        assert d.table.get(1) == (b"foo", b"bar")
 
     def test_multiple_instructions_in_one_feed(self):
         d = self._dec()
         data = _insert_literal(b"a", b"1") + _insert_literal(b"b", b"2")
         d.feed_encoder_stream(data)
-        assert d.insert_count == 2
+        assert d.table.insert_count == 2
 
     def test_partial_instruction_buffered(self):
         d = QpackDecoder(max_capacity=4096)
         full = _set_capacity(512)
         # Send only the first byte; the instruction is not yet complete
         d.feed_encoder_stream(full[:1])
-        assert d._table.capacity == 0   # not yet applied
+        assert d.table.capacity == 0   # not yet applied
         d.feed_encoder_stream(full[1:])
-        assert d._table.capacity == 512
+        assert d.table.capacity == 512
 
     def test_insert_count_increment_emitted(self):
         d = self._dec()
@@ -367,7 +367,7 @@ class TestFieldSectionDecoding:
             d.feed_encoder_stream(_set_capacity(max_cap))
             for i in range(ric):
                 d.feed_encoder_stream(_insert_literal(f"h{i}".encode(), b"v"))
-            assert d.insert_count == ric
+            assert d.table.insert_count == ric
 
             enc_ric = (ric % (2 * max_entries)) + 1
             # Just decoding the prefix should not raise

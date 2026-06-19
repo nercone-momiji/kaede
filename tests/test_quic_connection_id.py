@@ -25,7 +25,7 @@ class TestRetirePriorTo:
         quic_pair.handshake()
         client = quic_pair.client
 
-        client._on_new_connection_id(NewConnectionId(5, 5, b"NEWCID01", b"\x00" * 16))
+        client.on_new_connection_id(NewConnectionId(5, 5, b"NEWCID01", b"\x00" * 16))
 
         assert client.remote_cid == b"NEWCID01"
         assert client.remote_cid_seq == 5
@@ -37,13 +37,13 @@ class TestLimitEnforcement:
         client = quic_pair.client
         # Pool already holds seq 0 and 1 (limit 2); a third without retirement
         # is a CONNECTION_ID_LIMIT_ERROR.
-        client._on_new_connection_id(NewConnectionId(2, 0, b"EXTRACID", b"\x00" * 16))
+        client.on_new_connection_id(NewConnectionId(2, 0, b"EXTRACID", b"\x00" * 16))
         assert client.close_pending is not None
         assert client.close_pending.error_code == 0x09
 
     def test_retire_prior_to_above_sequence_is_error(self, quic_pair):
         quic_pair.handshake()
         client = quic_pair.client
-        client._on_new_connection_id(NewConnectionId(3, 5, b"BADCID00", b"\x00" * 16))
+        client.on_new_connection_id(NewConnectionId(3, 5, b"BADCID00", b"\x00" * 16))
         assert client.close_pending is not None
         assert client.close_pending.error_code == 0x07

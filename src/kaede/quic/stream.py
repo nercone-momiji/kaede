@@ -200,6 +200,7 @@ class StreamReceiver:
         first = self.received.first()
         if first is None or first[0] > self.consumed:
             return b""
+
         n = first[1] - self.consumed
         out = bytes(self.buffer[:n])
         del self.buffer[:n]
@@ -221,8 +222,5 @@ class Stream:
         self.stop_sending_pending: int | None = None
         self.is_bidi = stream_is_bidirectional(stream_id)
         self.data_blocked_sent_at: int | None = None
-
-        # Receive-side flow control: highest byte offset seen, and whether a
-        # MAX_STREAM_DATA frame extending our advertised limit is pending.
         self.recv_highest_offset = 0
         self.max_stream_data_pending = False

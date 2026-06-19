@@ -17,34 +17,34 @@ if TYPE_CHECKING:
     from .api.client import Config as ClientConfig
     from .api.server import Config as ServerConfig
 
-# Header fields preserved on a 304 (Not Modified) response (RFC 7232 §4.1).
-_NOT_MODIFIED_HEADERS = frozenset({
-    "cache-control", "content-location", "date", "etag", "expires", "vary", "last-modified", "server",
-})
+NOT_MODIFIED_HEADERS = frozenset({"cache-control", "content-location", "date", "etag", "expires", "vary", "last-modified", "server",})
 
-def _if_match_passes(field_value: str, etag: str) -> bool:
-    # RFC 7232 §3.1: strong comparison; "*" is true iff a representation exists.
+def if_match_passes(field_value: str, etag: str) -> bool:
     value = field_value.strip()
+
     if value == "*":
         return True
+
     if not etag:
         return False
+
     return any(etag_strong_match(tag, etag) for tag in split_list(value))
 
-def _if_none_match_matches(field_value: str, etag: str) -> bool:
-    # RFC 7232 §3.2: weak comparison; returns True when the precondition is
-    # *false* (i.e. a tag matches). "*" matches iff a representation exists.
+def if_none_match_matches(field_value: str, etag: str) -> bool:
     value = field_value.strip()
+
     if value == "*":
         return True
+
     if not etag:
         return False
+
     return any(etag_weak_match(tag, etag) for tag in split_list(value))
 
-def _not_modified(response: Response) -> Response:
+def not_modified(response: Response) -> Response:
     filtered = Headers({})
     for key, values in response.headers.headers.items():
-        if key in _NOT_MODIFIED_HEADERS:
+        if key in NOT_MODIFIED_HEADERS:
             for value in values:
                 filtered.append(key, value)
 
@@ -54,9 +54,10 @@ def _not_modified(response: Response) -> Response:
     response.compressed = None
     return response
 
-def _precondition_failed(response: Response) -> Response:
+def precondition_failed(response: Response) -> Response:
     for header in ("Content-Type", "Content-Encoding", "Transfer-Encoding", "Content-Range", "Accept-Ranges"):
         response.headers.remove(header)
+
     response.status_code = 412
     response.body = None
     response.compressed = None
@@ -64,18 +65,9 @@ def _precondition_failed(response: Response) -> Response:
     return response
 
 def evaluate_preconditions(request: Request, response: Response) -> Response | None:
-    """Evaluate conditional request preconditions in the RFC 7232 §6 / RFC 9110
-    §13.2.2 precedence order, returning a 304 or 412 response when a
-    precondition fails, or None to proceed.
-
-    Only GET and HEAD are evaluated here: for those the representation already
-    produced by the callback is simply not transmitted, which is side-effect
-    free. Preconditions on unsafe methods (PUT/DELETE/PATCH/...) must be
-    evaluated by the application before it performs the change, since Kaede
-    cannot undo a side effect the callback already applied."""
     if request.method not in ("GET", "HEAD"):
         return None
-    # RFC 9110 §13.1.1: ignore preconditions unless the response would be 2xx.
+
     if response.status_code != 200:
         return None
 
@@ -88,47 +80,45 @@ def evaluate_preconditions(request: Request, response: Response) -> Response | N
     if_none_match = request.headers.get("If-None-Match")
     if_modified_since = request.headers.get("If-Modified-Since")
 
-    # Step 1 / Step 2: If-Match takes precedence over If-Unmodified-Since.
     if if_match is not None:
-        if not _if_match_passes(if_match, etag):
-            return _precondition_failed(response)
-    elif if_unmodified_since is not None:
-        when = parse_http_date(if_unmodified_since)  # ignored if not a valid HTTP-date
-        if when is not None and last_modified is not None and last_modified > when:
-            return _precondition_failed(response)
+        if not if_match_passes(if_match, etag):
+            return precondition_failed(response)
 
-    # Step 3: If-None-Match.
+    elif if_unmodified_since is not None:
+        when = parse_http_date(if_unmodified_since)
+        if when is not None and last_modified is not None and last_modified > when:
+            return precondition_failed(response)
+
     if if_none_match is not None:
-        if _if_none_match_matches(if_none_match, etag):
-            return _not_modified(response)
+        if if_none_match_matches(if_none_match, etag):
+            return not_modified(response)
         return None
 
-    # Step 4: If-Modified-Since (only when If-None-Match is absent).
     if if_modified_since is not None:
         when = parse_http_date(if_modified_since)
         if when is not None and last_modified is not None and last_modified <= when:
-            return _not_modified(response)
+            return not_modified(response)
 
     return None
 
 def parse_accept_encoding(accept_encoding: str) -> dict[str, float]:
-    # RFC 9110 §12.5.3. Uses the shared quoted-string-aware list parser; when a
-    # coding appears more than once the last weight wins.
     result: dict[str, float] = {}
+
     for token, q, _ in parse_qlist(accept_encoding or ""):
         result[token] = q
+
     return result
 
-def _parse_one_range(spec: str, total: int) -> tuple[int, int] | str:
-    # Returns (start, end) inclusive for a satisfiable spec, "unsatisfiable" for
-    # a syntactically valid but unsatisfiable spec, or "invalid" for a
-    # malformed spec (RFC 7233 §2.1).
+def parse_one_range(spec: str, total: int) -> tuple[int, int] | str:
     if spec.startswith("-"):
         if not spec[1:].isdigit():
             return "invalid"
+
         suffix = int(spec[1:])
+
         if suffix == 0 or total == 0:
             return "unsatisfiable"
+
         return (max(0, total - suffix), total - 1)
 
     dash = spec.find("-")
@@ -157,10 +147,6 @@ def _parse_one_range(spec: str, total: int) -> tuple[int, int] | str:
     return (start, end)
 
 def parse_ranges(value: str, total: int) -> list[tuple[int, int]] | None:
-    """Parse a byte-range-set (RFC 7233 §2.1). Returns the list of satisfiable
-    (start, end) ranges (possibly empty when the set is valid but wholly
-    unsatisfiable -> 416), or None when the header should be ignored (unknown
-    unit or malformed -> serve a normal 200)."""
     if not value.startswith("bytes="):
         return None
 
@@ -171,21 +157,23 @@ def parse_ranges(value: str, total: int) -> list[tuple[int, int]] | None:
         spec = spec.strip()
         if not spec:
             continue
+
         saw_spec = True
-        parsed = _parse_one_range(spec, total)
+
+        parsed = parse_one_range(spec, total)
         if parsed == "invalid":
             return None
         if parsed == "unsatisfiable":
             continue
+
         ranges.append(parsed)
 
     if not saw_spec:
         return None
+
     return ranges
 
 def build_multipart_byteranges(parts: list[tuple[int, int, bytes]], total: int, content_type: str) -> tuple[bytes, str]:
-    """Serialize a multipart/byteranges payload (RFC 7233 §4.1, Appendix A).
-    parts is a list of (start, end, data). Returns (body, content_type)."""
     boundary = os.urandom(16).hex()
     crlf = b"\r\n"
     out = bytearray()
@@ -200,9 +188,7 @@ def build_multipart_byteranges(parts: list[tuple[int, int, bytes]], total: int, 
     out += b"--" + boundary.encode("ascii") + b"--" + crlf
     return bytes(out), f"multipart/byteranges; boundary={boundary}"
 
-def _effective_range(request: Request, response: Response) -> str:
-    """Return the Range header value to honor, or "" if the Range must be
-    ignored because an If-Range precondition does not match (RFC 7233 §3.2)."""
+def effective_range(request: Request, response: Response) -> str:
     range_header = request.headers.get("Range", "") or ""
     if not range_header:
         return ""
@@ -215,12 +201,10 @@ def _effective_range(request: Request, response: Response) -> str:
     last_modified = (response.headers.get("Last-Modified") or "").strip()
 
     if if_range.startswith("W/"):
-        # A weak validator is never usable in If-Range (RFC 7233 §3.2).
         return ""
     if if_range.startswith('"'):
         return range_header if etag and etag_strong_match(if_range, etag) else ""
 
-    # HTTP-date validator: exact match against Last-Modified, strong only.
     when = parse_http_date(if_range)
     lm = parse_http_date(last_modified) if last_modified else None
     return range_header if (when is not None and lm is not None and when == lm) else ""
@@ -281,8 +265,7 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
             if response.status_code == 200 and request.method == "GET":
                 response.headers.set("Accept-Ranges", "bytes", override=False)
 
-            # RFC 9110 §14.2: range handling is defined for GET only.
-            range_header = _effective_range(request, response) if request.method == "GET" and response.status_code == 200 else ""
+            range_header = effective_range(request, response) if request.method == "GET" and response.status_code == 200 else ""
 
             if range_header:
                 total = len(response.body)
@@ -340,8 +323,7 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
             response.headers.set("Accept-Ranges", "bytes")
             response.headers.set("Content-Type", response.content_type or response.headers.get("Content-Type") or mime or "application/octet-stream")
 
-            # RFC 9110 §14.2: range handling is defined for GET only.
-            range_header = _effective_range(request, response) if request.method == "GET" and response.status_code == 200 else ""
+            range_header = effective_range(request, response) if request.method == "GET" and response.status_code == 200 else ""
             ranges = parse_ranges(range_header, total) if range_header else None
 
             if range_header and ranges is not None and not ranges:

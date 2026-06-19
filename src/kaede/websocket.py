@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 import zlib
-import asyncio
 import base64
-import hashlib
 import struct
+import asyncio
+import hashlib
 from enum import IntEnum
 from typing import Any, Protocol, runtime_checkable
 
@@ -86,11 +86,14 @@ def parse_frames(buf: bytearray, max_payload_size: int | None = None) -> list[Fr
         if length == 126:
             if len(buf) < 4:
                 break
+
             length = struct.unpack_from(">H", buf, 2)[0]
             offset = 4
+
         elif length == 127:
             if len(buf) < 10:
                 break
+
             length = struct.unpack_from(">Q", buf, 2)[0]
             offset = 10
 
@@ -104,9 +107,12 @@ def parse_frames(buf: bytearray, max_payload_size: int | None = None) -> list[Fr
         if masked:
             mask_key = bytes(buf[offset:offset + 4])
             raw = bytearray(buf[mask_end:mask_end + length])
+
             for i in range(length):
                 raw[i] ^= mask_key[i % 4]
+
             payload = bytes(raw)
+
         else:
             payload = bytes(buf[mask_end:mask_end + length])
 
@@ -130,6 +136,7 @@ class PerMessageDeflate:
         else:
             if self.compress_context is None:
                 self.compress_context = zlib.compressobj(wbits=-self.server_max_window_bits)
+
             context = self.compress_context
 
         compressed = context.compress(data) + context.flush(zlib.Z_SYNC_FLUSH)
@@ -147,6 +154,7 @@ class PerMessageDeflate:
         else:
             if self.decompress_context is None:
                 self.decompress_context = zlib.decompressobj(wbits=-self.client_max_window_bits)
+
             context = self.decompress_context
 
         try:
@@ -208,6 +216,7 @@ class PerMessageDeflate:
                     pass
 
             return PerMessageDeflate(server_no_context_takeover=True, client_no_context_takeover="client_no_context_takeover" in params, server_max_window_bits=server_max, client_max_window_bits=client_max)
+
         return None
 
 class WebSocket:
@@ -288,13 +297,12 @@ class WebSocket:
                         reason_valid = False
 
                     if not reason_valid:
-                        # RFC 6455 §5.5.1 / §8.1: the Close reason is UTF-8 text;
-                        # an invalid encoding fails the connection with 1007.
                         echo = struct.pack(">H", 1007)
                     elif 1000 <= code <= 1003 or 1007 <= code <= 1011 or 3000 <= code <= 4999:
                         echo = frame.payload[:2]
                     else:
                         echo = b""
+
                     self.write(build_frame(Opcode.CLOSE, echo, mask=self.mask_frames))
 
                 else:

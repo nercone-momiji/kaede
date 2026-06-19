@@ -67,8 +67,6 @@ class PacketKeys:
         self.key = hkdf_expand_label(secret, b"quic key", suite.key_len, suite.algorithm)
         self.iv = hkdf_expand_label(secret, b"quic iv", 12, suite.algorithm)
 
-        # RFC 9001 §6.1: a key update does not change the header protection key,
-        # so it can be carried over from the prior generation when provided.
         if hp is not None:
             self.hp = hp
         else:
@@ -78,7 +76,6 @@ class PacketKeys:
         self.aead = ChaCha20Poly1305(self.key) if suite.is_chacha else AESGCM(self.key)
 
     def next_generation(self) -> "PacketKeys":
-        # RFC 9001 §6.1: secret_<n+1> = HKDF-Expand-Label(secret_<n>, "quic ku", "", Hash.length)
         new_secret = hkdf_expand_label(self.secret, b"quic ku", self.suite.algorithm.digest_size, self.suite.algorithm)
         return PacketKeys(new_secret, self.suite, hp=self.hp)
 
@@ -105,8 +102,6 @@ def initial_keys(destination_connection_id: bytes) -> tuple[PacketKeys, PacketKe
     return PacketKeys(client_secret, suite), PacketKeys(server_secret, suite)
 
 def retry_integrity_tag(pseudo_packet: bytes) -> bytes:
-    # RFC 9001 §5.8: AEAD_AES_128_GCM over the Retry Pseudo-Packet (as AAD) with
-    # fixed key/nonce; the 16-byte authentication tag is the Retry Integrity Tag.
     algo = hashes.SHA256()
     key = hkdf_expand_label(RETRY_INTEGRITY_SECRET, b"quic retry integrity", 16, algo)
     nonce = hkdf_expand_label(RETRY_INTEGRITY_SECRET, b"quic retry integrity nonce", 12, algo)
