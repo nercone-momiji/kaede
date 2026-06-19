@@ -256,6 +256,15 @@ class TestChunkedEncoding:
                 client=CLIENT,
             )
 
+    def test_chunked_last_after_other_codings_allowed(self):
+        """RFC 9110 §8.7: other codings may precede 'chunked' if chunked is final"""
+        req = H1.parse_request(
+            b"POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: gzip,chunked\r\n\r\n"
+            b"5\r\nhello\r\n0\r\n\r\n",
+            client=CLIENT,
+        )
+        assert req.body == b"hello"
+
     def test_chunked_duplicate_rejected(self):
         """RFC 9112 §6.1: 'chunked' must appear exactly once"""
         with pytest.raises(ValueError):
@@ -629,8 +638,8 @@ class TestTransferEncodingValidation:
 
     def test_transfer_encoding_gzip_then_chunked_accepted(self):
         """RFC 9112 §6.1: multiple TEs are allowed if 'chunked' is last;
-        chunked MUST be decoded; gzip (a content-transfer encoding) is left
-        to application decoding."""
+        chunked MUST be decoded; gzip (a transfer coding here) is left
+        to application-level decoding."""
         import gzip as _gzip
         gzip_payload = _gzip.compress(b"hello")
         hex_size = f"{len(gzip_payload):x}".encode()
@@ -671,7 +680,11 @@ class TestResponseParsingEdgeCases:
         assert status == code
 
     def test_response_with_both_te_and_cl_te_wins(self):
-        """RFC 9112 §6.3: when both TE and CL present in response, TE governs body length"""
+        """RFC 9112 §6.3: in responses, TE takes precedence over CL.
+
+        Note the intentional asymmetry: requests carrying both headers are rejected,
+        while responses are parsed using Transfer-Encoding as authoritative.
+        """
         resp = H1.parse_response(
             b"HTTP/1.1 200 OK\r\n"
             b"Transfer-Encoding: chunked\r\n"
