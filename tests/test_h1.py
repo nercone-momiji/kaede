@@ -256,6 +256,15 @@ class TestChunkedEncoding:
                 client=CLIENT,
             )
 
+    def test_chunked_last_after_other_codings_allowed(self):
+        """RFC 9110 §8.7: other codings may precede 'chunked' if chunked is final"""
+        req = H1.parse_request(
+            b"POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: gzip,chunked\r\n\r\n"
+            b"5\r\nhello\r\n0\r\n\r\n",
+            client=CLIENT,
+        )
+        assert req.body == b"hello"
+
     def test_chunked_duplicate_rejected(self):
         """RFC 9112 §6.1: 'chunked' must appear exactly once"""
         with pytest.raises(ValueError):
