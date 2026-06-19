@@ -214,8 +214,9 @@ class H2Connection:
             self.connection.update_settings({SettingCodes.ENABLE_CONNECT_PROTOCOL: 1, SettingCodes.MAX_CONCURRENT_STREAMS: self.max_concurrent_streams})
         return self.connection.data_to_send()
 
-    def receive(self, data: bytes, *, client: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int], scheme: Literal["http", "https"] = "https", secure: bool = True, tls: TLSInfo | None = None) -> tuple[bytes, list[Request], list[H2WSUpgrade], bool]:
+    def receive(self, data: bytes, *, client: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int], scheme: Literal["http", "https"] = "https", secure: bool = True, tls: TLSInfo | None = None) -> tuple[bytes, list[Request], list[H2WSUpgrade], bool, bool]:
         closed = False
+        rst_flood = False
         events = self.connection.receive_data(data)
         completed: list[Request] = []
         websocket_upgrades: list[H2WSUpgrade] = []
@@ -355,6 +356,7 @@ class H2Connection:
 
                 if self.reset_count > self.max_stream_resets:
                     closed = True
+                    rst_flood = True
 
                 if event.stream_id in self.websocket_streams:
                     self.websocket_streams[event.stream_id].put_nowait(None)
@@ -388,7 +390,7 @@ class H2Connection:
 
         self.flow_control_event.set()
 
-        return self.connection.data_to_send(), completed, websocket_upgrades, closed
+        return self.connection.data_to_send(), completed, websocket_upgrades, closed, rst_flood
 
     def enqueue(self, stream_id: int, data: bytes, end_stream: bool):
         buffer = self.send_buffers.get(stream_id)
@@ -587,7 +589,9 @@ class H2Connection:
                         headers.append(name, value)
 
                 if valid:
-                    out_events.append(("response", event.stream_id, status, headers))
+                    if not (100 <= status < 200):
+                        out_events.append(("response", event.stream_id, status, headers))
+
                     if event.stream_ended:
                         out_events.append(("end", event.stream_id))
 
@@ -664,7 +668,7 @@ class H2Connection:
 
         self.reset_keepalive()
 
-        out, requests, websocket_upgrades, closed = self.receive(data, client=self.client, secure=self.secure, tls=self.tls)
+        out, requests, websocket_upgrades, closed, rst_flood = self.receive(data, client=self.client, secure=self.secure, tls=self.tls)
         if out:
             self.transport.write(out)
 
@@ -675,7 +679,8 @@ class H2Connection:
             self.handler.create_task(self.websocket_respond(websocket_upgrade))
 
         if closed:
-            goaway = self.send_goaway()
+            error_code = h2.errors.ErrorCodes.ENHANCE_YOUR_CALM if rst_flood else 0
+            goaway = self.send_goaway(error_code=error_code)
             if goaway and self.transport is not None:
                 self.transport.write(goaway)
             if self.transport is not None:

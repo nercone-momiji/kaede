@@ -83,13 +83,10 @@ class TestURLOriginForm:
         assert url.path == "/search"
         assert url.query == "q=hello"
 
-    def test_path_with_fragment(self):
-        """RFC 9110 §4.1: fragments are usually stripped by the client but must be
-        handled correctly if present in the target."""
-        url = URL.from_target("/page?a=1#section", "https", "example.com")
-        assert url.path == "/page"
-        assert url.query == "a=1"
-        assert url.fragment == "section"
+    def test_path_with_fragment_rejected(self):
+        """RFC 9112 §3.2: request targets MUST NOT contain fragment identifiers."""
+        with pytest.raises(ValueError):
+            URL.from_target("/page?a=1#section", "https", "example.com")
 
     def test_host_from_authority_with_port(self):
         url = URL.from_target("/api/v1", "https", "api.example.com:8443")
@@ -145,10 +142,10 @@ class TestURLAbsoluteForm:
         url = URL.from_target("http://example.com/search?q=test&lang=en", "http", "")
         assert url.query == "q=test&lang=en"
 
-    def test_fragment_preserved(self):
-        url = URL.from_target("http://example.com/page?x=1#anchor", "http", "")
-        assert url.query == "x=1"
-        assert url.fragment == "anchor"
+    def test_fragment_in_absolute_form_rejected(self):
+        """RFC 9112 §3.2: request targets MUST NOT contain fragment identifiers."""
+        with pytest.raises(ValueError):
+            URL.from_target("http://example.com/page?x=1#anchor", "http", "")
 
     def test_root_path_implicit(self):
         url = URL.from_target("http://example.com/", "http", "")
@@ -271,9 +268,10 @@ class TestURLProperties:
         url = URL.from_target("/path?q=1", "http", "example.com")
         assert str(url) == "http://example.com/path?q=1"
 
-    def test_str_with_fragment(self):
-        url = URL.from_target("/path?q=1#sec", "http", "example.com")
-        assert str(url) == "http://example.com/path?q=1#sec"
+    def test_str_with_fragment_rejected(self):
+        """RFC 9112 §3.2: request targets MUST NOT contain fragment identifiers."""
+        with pytest.raises(ValueError):
+            URL.from_target("/path?q=1#sec", "http", "example.com")
 
     def test_str_asterisk_form(self):
         url = URL.from_target("*", "http", "example.com")

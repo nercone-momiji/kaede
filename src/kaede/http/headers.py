@@ -32,7 +32,7 @@ class ETag:
 class AcceptEncoding:
     @staticmethod
     def parse(value: str) -> dict[str, float]:
-        out: dict[str, float] = []
+        out: dict[str, float] = {}
 
         for element in split_list(value):
             head, params = AcceptEncoding.parse_params(element)

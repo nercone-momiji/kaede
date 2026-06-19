@@ -28,7 +28,9 @@ class URL:
 
         path, _, qf = target.partition("?")
         query, _, fragment = qf.partition("#")
-        return cls(scheme=scheme, host=host, port=port, path=path, query=query, fragment=fragment)
+        if fragment:
+            raise ValueError("request target must not contain a fragment identifier")
+        return cls(scheme=scheme, host=host, port=port, path=path, query=query, fragment="")
 
     @classmethod
     def parse_absolute(cls, target: str) -> URL:
@@ -39,7 +41,9 @@ class URL:
         host, port = URL.parse_authority(authority_part)
         path, _, qf = path_and_rest.partition("?")
         query, _, fragment = qf.partition("#")
-        return cls(scheme=scheme.lower(), host=host.lower(), port=port, path=path or "/", query=query, fragment=fragment)
+        if fragment:
+            raise ValueError("request target must not contain a fragment identifier")
+        return cls(scheme=scheme.lower(), host=host.lower(), port=port, path=path or "/", query=query, fragment="")
 
     @staticmethod
     def parse_authority(authority: str) -> tuple[str, int | None]:

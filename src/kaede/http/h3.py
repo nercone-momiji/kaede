@@ -498,15 +498,31 @@ class H3Connection:
         self.timer = None
         self.quic.handle_timer(self.now())
 
-        terminated = any(isinstance(event, ConnectionTerminated) for event in self.quic.events())
+        events = self.quic.events()
+        terminated = False
+
+        for event in events:
+            if isinstance(event, HandshakeCompleted):
+                if self.is_client:
+                    if not self.connected.done():
+                        self.connected.set_result(None)
+                elif self.tls is None:
+                    self.tls = self.quic.tls.info()
+            elif isinstance(event, ConnectionTerminated):
+                terminated = True
+                if self.is_client:
+                    self.fail_all(ConnectionError("connection terminated"))
+
+        for event in self.feed(events):
+            if self.is_client:
+                self.on_client_event(event)
+            else:
+                self.on_server_event(event)
 
         self.flush()
 
-        if terminated:
-            if self.is_client:
-                self.fail_all(ConnectionError("connection terminated"))
-            elif self.addr is not None:
-                self.protocol._reap(self.addr)
+        if terminated and not self.is_client and self.addr is not None:
+            self.protocol.reap(self.addr)
 
     def on_server_event(self, ev):
         if isinstance(ev, HeadersReceived):
@@ -874,6 +890,9 @@ class H3Connection:
                 self.quic.close(0x010E, "H3_MESSAGE_ERROR")
                 return
 
+            if 100 <= status < 200:
+                return
+
             state.set_headers(status, headers)
 
         elif isinstance(ev, DataReceived):
@@ -935,7 +954,7 @@ class H3Connection:
 
         transport = H3WebSocketTransport(self, stream_id)
         max_size = self.config.max_websocket_message_size if self.handler else None
-        ws = WebSocket(transport, require_masking=False, mask_frames=True, subprotocol=subprotocol, deflate=None, max_message_size=max_size)
+        ws = WebSocket(transport, require_masking=False, mask_frames=False, subprotocol=subprotocol, deflate=None, max_message_size=max_size)
 
         asyncio.ensure_future(self.websocket_read(stream_id, ws))
         return ws
@@ -972,6 +991,7 @@ class H3Protocol(asyncio.DatagramProtocol):
         self.transport: asyncio.DatagramTransport | None = None
         self.connection = connection
         self.connections: dict[tuple, H3Connection] = {}
+        self.connections_by_cid: dict[bytes, H3Connection] = {}
         self.max_connections = max_connections
         self.quic_tls_context = quic_tls_context
         self.connections_per_ip: dict[str, int] = {}
@@ -991,6 +1011,19 @@ class H3Protocol(asyncio.DatagramProtocol):
             return
 
         conn = self.connections.get(addr)
+        if conn is None:
+            if not (data[0] & 0x80) and len(data) >= 9:
+                dcid = data[1:9]
+                migrated = self.connections_by_cid.get(dcid)
+                if migrated is not None:
+                    old_addr = migrated.addr
+                    if old_addr is not None and old_addr in self.connections:
+                        del self.connections[old_addr]
+
+                    migrated.addr = addr
+                    self.connections[addr] = migrated
+                    conn = migrated
+
         if conn is None:
             if len(data) < 1200 or not (data[0] & 0x80):
                 return
@@ -1043,14 +1076,24 @@ class H3Protocol(asyncio.DatagramProtocol):
 
             conn = H3Connection(quic, self, is_client=False, addr=addr)
             self.connections[addr] = conn
+            self.connections_by_cid[quic.local_cid] = conn
             self.connections_per_ip[ip] = self.connections_per_ip.get(ip, 0) + 1
 
         if conn.receive_datagram(data):
             self.reap(addr)
+        else:
+            for cid, _ in conn.quic.local_cid_info.values():
+                if cid not in self.connections_by_cid:
+                    self.connections_by_cid[cid] = conn
 
     def reap(self, addr):
-        if self.connections.pop(addr, None) is None:
+        conn = self.connections.pop(addr, None)
+        if conn is None:
             return
+
+        stale_cids = [cid for cid, c in self.connections_by_cid.items() if c is conn]
+        for cid in stale_cids:
+            del self.connections_by_cid[cid]
 
         ip = addr[0] if isinstance(addr, tuple) else str(addr)
         count = self.connections_per_ip.get(ip, 1)

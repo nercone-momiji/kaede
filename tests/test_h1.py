@@ -21,9 +21,10 @@ class TestRequestLine:
         assert req.target == "/"
         assert req.protocol == "HTTP/1.1"
 
-    def test_target_preserved(self):
-        req = H1.parse_request(b"GET /path?q=1#frag HTTP/1.1\r\nHost: example.com\r\n\r\n", client=CLIENT)
-        assert req.target == "/path?q=1#frag"
+    def test_fragment_in_target_rejected(self):
+        """RFC 9112 §3.2: Request targets MUST NOT contain fragment identifiers."""
+        with pytest.raises(ValueError):
+            H1.parse_request(b"GET /path?q=1#frag HTTP/1.1\r\nHost: example.com\r\n\r\n", client=CLIENT)
 
     @pytest.mark.parametrize("method", [
         "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"

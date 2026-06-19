@@ -562,6 +562,8 @@ class Cookie:
             parts.append("Expires=" + HTTPDate.build(self.expires))
 
         if self.max_age is not None:
+            if int(self.max_age) < 0:
+                raise ValueError("Max-Age must be a non-negative integer")
             parts.append(f"Max-Age={int(self.max_age)}")
 
         if self.domain:
@@ -638,6 +640,7 @@ class Headers:
 
         self.set("Vary", ", ".join(vary))
 
+    @staticmethod
     def parse_cookie(value: str) -> list[tuple[str, str]]:
         pairs: list[tuple[str, str]] = []
         if not value:
@@ -657,6 +660,7 @@ class Headers:
 
         return pairs
 
+    @staticmethod
     def parse_set_cookie(value: str) -> Cookie | None:
         if not value:
             return None

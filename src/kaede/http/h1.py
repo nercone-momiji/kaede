@@ -43,7 +43,7 @@ class H1:
         except ValueError:
             raise ValueError("malformed HTTP/1 request line")
 
-        if not version_b.decode().startswith("HTTP/1"):
+        if version_b not in (b"HTTP/1.0", b"HTTP/1.1"):
             raise HTTPVersionNotSupportedError(f"unsupported HTTP version: {version_b!r}")
 
         headers = Headers({})
@@ -185,7 +185,7 @@ class H1:
         version_b, status_b = parts[0], parts[1]
         phrase = parts[2].decode("latin-1") if len(parts) > 2 else ""
 
-        if not version_b.decode().startswith("HTTP/1"):
+        if version_b not in (b"HTTP/1.0", b"HTTP/1.1"):
             raise ValueError(f"unsupported HTTP version: {version_b!r}")
 
         if not (len(status_b) == 3 and status_b.isascii() and status_b.isdigit()):

@@ -320,7 +320,7 @@ def make_h2_pair():
     client.initiate_connection()
     client_preface = client.data_to_send()
 
-    out, _, _, _ = server.receive(client_preface, client=CLIENT_ADDR)
+    out, _, _, _, _ = server.receive(client_preface, client=CLIENT_ADDR)
     client.receive_data(server_preface)
     if out:
         client.receive_data(out)
@@ -344,7 +344,7 @@ class TestH2ReceiveValidRequests:
             (":authority", "example.com"),
         ], end_stream=True)
         data = client.data_to_send()
-        _, requests, _, _ = server.receive(data, client=CLIENT_ADDR)
+        _, requests, _, _, _ = server.receive(data, client=CLIENT_ADDR)
         assert len(requests) == 1
         assert requests[0].method == "GET"
         assert requests[0].target == "/"
@@ -363,7 +363,7 @@ class TestH2ReceiveValidRequests:
         ], end_stream=False)
         client.send_data(sid, body, end_stream=True)
         data = client.data_to_send()
-        _, requests, _, _ = server.receive(data, client=CLIENT_ADDR)
+        _, requests, _, _, _ = server.receive(data, client=CLIENT_ADDR)
         assert len(requests) == 1
         req = requests[0]
         assert req.method == "POST"
@@ -380,7 +380,7 @@ class TestH2ReceiveValidRequests:
             (":authority", "example.com"),
         ], end_stream=True)
         data = client.data_to_send()
-        _, requests, _, _ = server.receive(data, client=CLIENT_ADDR)
+        _, requests, _, _, _ = server.receive(data, client=CLIENT_ADDR)
         assert requests[0].h2 is not None
         assert requests[0].h2.stream_id == sid
 
@@ -395,7 +395,7 @@ class TestH2ReceiveValidRequests:
             (":authority", "example.com"),
         ], end_stream=True)
         data = client.data_to_send()
-        _, requests, _, _ = server.receive(data, client=CLIENT_ADDR)
+        _, requests, _, _, _ = server.receive(data, client=CLIENT_ADDR)
         assert isinstance(requests[0].h2.connection_id, bytes)
         assert len(requests[0].h2.connection_id) == 8
 
@@ -411,7 +411,7 @@ class TestH2ReceiveValidRequests:
         ], end_stream=True)
         data = client.data_to_send()
         addr = (ipaddress.IPv4Address("10.0.0.1"), 5000)
-        _, requests, _, _ = server.receive(data, client=addr)
+        _, requests, _, _, _ = server.receive(data, client=addr)
         assert requests[0].client == addr
 
     def test_authority_becomes_host_header(self):
@@ -425,7 +425,7 @@ class TestH2ReceiveValidRequests:
             (":authority", "api.example.com"),
         ], end_stream=True)
         data = client.data_to_send()
-        _, requests, _, _ = server.receive(data, client=CLIENT_ADDR)
+        _, requests, _, _, _ = server.receive(data, client=CLIENT_ADDR)
         assert requests[0].headers.get("host") == "api.example.com"
 
     def test_multiple_requests_in_single_receive(self):
@@ -440,7 +440,7 @@ class TestH2ReceiveValidRequests:
                 (":authority", "example.com"),
             ], end_stream=True)
         data = client.data_to_send()
-        _, requests, _, _ = server.receive(data, client=CLIENT_ADDR)
+        _, requests, _, _, _ = server.receive(data, client=CLIENT_ADDR)
         assert len(requests) == 3
 
 def make_h2_pair_forbidden_headers():
@@ -472,7 +472,7 @@ def make_h2_pair_forbidden_headers():
     client.initiate_connection()
     client_preface = client.data_to_send()
 
-    out, _, _, _ = server.receive(client_preface, client=CLIENT_ADDR)
+    out, _, _, _, _ = server.receive(client_preface, client=CLIENT_ADDR)
     client.receive_data(server_preface)
     if out:
         client.receive_data(out)
@@ -502,7 +502,7 @@ class TestH2ReceiveForbiddenHeaders:
             pytest.skip(f"h2 client refused to send '{header}' even with validation disabled")
 
         data = client.data_to_send()
-        _, requests, _, _ = server.receive(data, client=CLIENT_ADDR)
+        _, requests, _, _, _ = server.receive(data, client=CLIENT_ADDR)
         assert len(requests) == 0
 
 class TestH2ContentLengthMismatch:
@@ -576,7 +576,7 @@ class TestH2ExtendedConnect:
             pytest.skip("h2 client does not support :protocol pseudo-header for extended CONNECT")
 
         data = client.data_to_send()
-        _, requests, websocket_upgrades, _ = server.receive(data, client=CLIENT_ADDR)
+        _, requests, websocket_upgrades, _, _ = server.receive(data, client=CLIENT_ADDR)
         assert len(websocket_upgrades) == 1
         assert len(requests) == 0
         assert websocket_upgrades[0].stream_id == sid

@@ -306,7 +306,7 @@ class TestCloseHandshake:
 
     def test_invalid_close_code_responds_with_1002(self):
         """RFC 6455 §7.4: Reserved/undefined codes are a protocol error → respond with 1002"""
-        for invalid_code in (999, 1004, 1005, 1006, 1012, 1014, 1015, 1100, 2000, 2999, 5000):
+        for invalid_code in (999, 1004, 1005, 1006, 1015, 1100, 2000, 2999, 5000):
             ws, transport = make_ws(require_masking=False)
             feed(ws, build_frame(Opcode.CLOSE, struct.pack(">H", invalid_code)))
             frames = parse_written(transport)
@@ -417,7 +417,7 @@ class TestCloseCodeValidity:
             echoed = struct.unpack(">H", close.payload[:2])[0]
             assert echoed != 1004
 
-    @pytest.mark.parametrize("code", [0, 999, 1012, 2999, 5000])
+    @pytest.mark.parametrize("code", [0, 999, 2999, 5000])
     def test_invalid_close_codes_respond_with_1002(self, code):
         """RFC 6455 §7.4: out-of-range/reserved codes are a protocol error → respond with 1002.
 
@@ -432,9 +432,9 @@ class TestCloseCodeValidity:
         assert len(close.payload) >= 2
         assert struct.unpack(">H", close.payload[:2])[0] == 1002
 
-    @pytest.mark.parametrize("code", [1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011])
+    @pytest.mark.parametrize("code", [1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014])
     def test_defined_close_codes_echoed(self, code):
-        """RFC 6455 §7.4.1: defined close codes must be echoed back"""
+        """RFC 6455 §7.4.1 + IANA registry: defined close codes must be echoed back"""
         ws, transport = make_ws(require_masking=False)
         feed(ws, build_frame(Opcode.CLOSE, struct.pack(">H", code)))
         frames = parse_written(transport)
