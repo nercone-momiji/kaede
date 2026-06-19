@@ -27,7 +27,7 @@ jobs:
         id: cache-openssl
         uses: actions/cache@v4
         with:
-          path: /usr/local/openssl-3
+          path: ~/openssl-3
           key: openssl-${{ steps.openssl-version.outputs.version }}-${{ runner.os }}
 
       - name: Build OpenSSL ${{ steps.openssl-version.outputs.version }}
@@ -39,14 +39,15 @@ jobs:
           curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-${VERSION}/openssl-${VERSION}.tar.gz" \
             | tar xz
           cd "openssl-${VERSION}"
-          ./Configure --prefix=/usr/local/openssl-3 --openssldir=/usr/local/openssl-3 shared no-docs
+          ./Configure --prefix="$HOME/openssl-3" --openssldir="$HOME/openssl-3" shared no-docs
           make -j$(nproc)
-          sudo make install_sw
+          make install_sw
 
       - name: Set KAEDE_LIBSSL
         run: |
-          LIBSSL=$(find /usr/local/openssl-3 -name "libssl.so.3" | head -1)
+          LIBSSL=$(find ~/openssl-3 -name "libssl.so.3" | head -1)
           echo "Found libssl at: ${LIBSSL}"
+          test -n "${LIBSSL}" || { echo "libssl.so.3 not found under ~/openssl-3"; exit 1; }
           echo "KAEDE_LIBSSL=${LIBSSL}" >> $GITHUB_ENV
 
       - name: Install uv
