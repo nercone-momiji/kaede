@@ -101,21 +101,35 @@ def parse_set_cookie(value: str) -> Cookie | None:
         if attr_name == "expires":
             from .date import parse_http_date
             cookie.expires = parse_http_date(attr_value)
+
         elif attr_name == "max-age":
-            try:
-                cookie.max_age = int(attr_value)
-            except ValueError:
-                pass
+            if attr_value:
+                first = attr_value[0]
+                rest = attr_value[1:]
+                if (first == "-" or first.isdigit()) and (not rest or rest.isdigit()):
+                    try:
+                        cookie.max_age = int(attr_value)
+                    except ValueError:
+                        pass
+
         elif attr_name == "domain":
-            cookie.domain = attr_value.lstrip(".") or None
+            if attr_value.startswith("."):
+                attr_value = attr_value[1:]
+
+            cookie.domain = attr_value.lower() or None
+
         elif attr_name == "path":
             cookie.path = attr_value or None
+
         elif attr_name == "secure":
             cookie.secure = True
+
         elif attr_name == "httponly":
             cookie.http_only = True
+
         elif attr_name == "samesite":
             normalized = attr_value.capitalize()
+
             if normalized in ("Strict", "Lax", "None"):
                 cookie.same_site = normalized
 

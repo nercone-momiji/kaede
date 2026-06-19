@@ -304,15 +304,16 @@ class TestCloseHandshake:
         code = struct.unpack(">H", close.payload[:2])[0]
         assert code == 1002
 
-    def test_invalid_close_code_cleared(self):
-        """RFC 6455 §7.4.2: Invalid close codes must not be echoed"""
-        ws, transport = make_ws(require_masking=False)
-        # Code 999 is outside the valid range
-        feed(ws, build_frame(Opcode.CLOSE, struct.pack(">H", 999)))
-        frames = parse_written(transport)
-        close = next(f for f in frames if f.opcode == Opcode.CLOSE)
-        # payload should be empty (invalid code not echoed)
-        assert close.payload == b""
+    def test_invalid_close_code_responds_with_1002(self):
+        """RFC 6455 §7.4: Reserved/undefined codes are a protocol error → respond with 1002"""
+        for invalid_code in (999, 1004, 1005, 1006, 1012, 1014, 1015, 1100, 2000, 2999, 5000):
+            ws, transport = make_ws(require_masking=False)
+            feed(ws, build_frame(Opcode.CLOSE, struct.pack(">H", invalid_code)))
+            frames = parse_written(transport)
+            close = next(f for f in frames if f.opcode == Opcode.CLOSE)
+            assert len(close.payload) >= 2, f"empty close for invalid code {invalid_code}"
+            code = struct.unpack(">H", close.payload[:2])[0]
+            assert code == 1002, f"expected 1002 for invalid code {invalid_code}, got {code}"
 
 class TestRSVBits:
     def test_rsv2_set_without_extension_closes(self):
@@ -417,13 +418,19 @@ class TestCloseCodeValidity:
             assert echoed != 1004
 
     @pytest.mark.parametrize("code", [0, 999, 1012, 2999, 5000])
-    def test_invalid_close_codes_not_echoed(self, code):
-        """RFC 6455 §7.4.2: out-of-range codes must not be echoed"""
+    def test_invalid_close_codes_respond_with_1002(self, code):
+        """RFC 6455 §7.4: out-of-range/reserved codes are a protocol error → respond with 1002.
+
+        Autobahn fuzzingserver test cases 7.9.x expect a 1002 (protocol error)
+        close response when an undefined/reserved code is received; an empty
+        payload is not sufficient.
+        """
         ws, transport = make_ws(require_masking=False)
         feed(ws, build_frame(Opcode.CLOSE, struct.pack(">H", code)))
         frames = parse_written(transport)
         close = next(f for f in frames if f.opcode == Opcode.CLOSE)
-        assert close.payload == b""
+        assert len(close.payload) >= 2
+        assert struct.unpack(">H", close.payload[:2])[0] == 1002
 
     @pytest.mark.parametrize("code", [1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011])
     def test_defined_close_codes_echoed(self, code):

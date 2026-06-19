@@ -292,7 +292,10 @@ class H3Connection:
                 try:
                     self.qpack_decoder.feed_encoder_stream(bytes(buf))
                 except qpack.QpackError:
-                    self.quic.close(0x0200, "QPACK decompression failed")
+                    # RFC 9204 §6.2: failure on the QPACK encoder stream is
+                    # signalled with QPACK_ENCODER_STREAM_ERROR (0x0201), not
+                    # QPACK_DECOMPRESSION_FAILED.
+                    self.quic.close(0x0201, "QPACK encoder stream error")
                     return
 
                 del buf[:]

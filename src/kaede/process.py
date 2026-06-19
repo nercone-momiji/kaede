@@ -19,22 +19,22 @@ if TYPE_CHECKING:
 
 NOT_MODIFIED_HEADERS = frozenset({"cache-control", "content-location", "date", "etag", "expires", "vary", "last-modified", "server",})
 
-def if_match_passes(field_value: str, etag: str) -> bool:
+def if_match_passes(field_value: str, etag: str, has_representation: bool = True) -> bool:
     value = field_value.strip()
 
     if value == "*":
-        return bool(etag)
+        return has_representation
 
     if not etag:
         return False
 
     return any(etag_strong_match(tag, etag) for tag in split_list(value))
 
-def if_none_match_matches(field_value: str, etag: str) -> bool:
+def if_none_match_matches(field_value: str, etag: str, has_representation: bool = True) -> bool:
     value = field_value.strip()
 
     if value == "*":
-        return bool(etag)
+        return has_representation
 
     if not etag:
         return False
@@ -65,10 +65,11 @@ def precondition_failed(response: Response) -> Response:
     return response
 
 def evaluate_preconditions(request: Request, response: Response) -> Response | None:
-    if response.status_code != 200:
+    if not (200 <= response.status_code < 300 or response.status_code == 412):
         return None
 
     is_safe = request.method in ("GET", "HEAD")
+    has_representation = response.body is not None or response.has_real_body or response.is_streaming
 
     etag = (response.headers.get("ETag") or "").strip()
     last_modified_raw = (response.headers.get("Last-Modified") or "").strip()
@@ -80,7 +81,7 @@ def evaluate_preconditions(request: Request, response: Response) -> Response | N
     if_modified_since = request.headers.get("If-Modified-Since")
 
     if if_match is not None:
-        if not if_match_passes(if_match, etag):
+        if not if_match_passes(if_match, etag, has_representation):
             return precondition_failed(response)
 
     elif if_unmodified_since is not None:
@@ -89,7 +90,7 @@ def evaluate_preconditions(request: Request, response: Response) -> Response | N
             return precondition_failed(response)
 
     if if_none_match is not None:
-        if if_none_match_matches(if_none_match, etag):
+        if if_none_match_matches(if_none_match, etag, has_representation):
             if is_safe:
                 return not_modified(response)
             return precondition_failed(response)
@@ -252,6 +253,9 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
 
     response.headers.set("Date", email.utils.formatdate(usegmt=True), override=False)
     response.headers.set("Server", config.server_name, override=False)
+
+    if not request.secure and "Strict-Transport-Security" in response.headers:
+        response.headers.remove("Strict-Transport-Security")
 
     conditional = evaluate_preconditions(request, response)
     if conditional is not None:

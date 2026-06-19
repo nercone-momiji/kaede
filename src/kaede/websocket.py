@@ -296,14 +296,12 @@ class WebSocket:
                     except UnicodeDecodeError:
                         reason_valid = False
 
-                    if code in (1005, 1006):
-                        echo = struct.pack(">H", 1002)
-                    elif not reason_valid:
+                    if not reason_valid:
                         echo = struct.pack(">H", 1007)
                     elif 1000 <= code <= 1003 or 1007 <= code <= 1011 or 3000 <= code <= 4999:
                         echo = frame.payload[:2]
                     else:
-                        echo = b""
+                        echo = struct.pack(">H", 1002)
 
                     self.write(build_frame(Opcode.CLOSE, echo, mask=self.mask_frames))
 
