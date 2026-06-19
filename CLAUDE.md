@@ -1,61 +1,61 @@
 # CLAUDE.md
-このファイルは、Claude CodeがKaedeのソースコードを扱う際に知っておくべきことを提供するためのものです。
+This file provides information that Claude Code needs to know when handling the source code of Kaede.
 
-## 概要
-KaedeはHTTPリクエスト/レスポンスを処理するためのPythonライブラリです。
+## Overview
+Kaede is a Python library for processing HTTP requests and responses.
 
-HTTP/1.1/2/3に対応しており、ASGIを参考にしたRequest/Responseなどの構造体をベースにリクエスト/レスポンスを処理できます。
+It supports HTTP/1.1/2/3 and can handle requests and responses based on structures such as Request/Response inspired by ASGI.
 
-## 自動テスト
-自動でのテストにはpytestを使用しています。最低限のテストは自動テストで行えますが、自動テストは完璧ではないため可能な限り手動でのテストを優先してください。
+## Automated Testing
+pytest is used for automated testing. While minimal tests can be covered by automated tests, they are not perfect, so prioritize manual testing as much as possible.
 
-自動テストを使用したり、テスト内容を更新する場合、次を遵守してください。
+When using automated tests or updating test content, observe the following:
 
-- 自動テストは、Kaedeに存在する**全ての**既存の機能が正しく動作し、RFCなどに記載されている仕様に**完全に**準拠していることを簡単に検証するためにのみ使用してください。
-- 自動テストの内容は、Kaedeの動作に関係なく常に「プロトコルの厳密な仕様に**完全に**準拠しているか」を検証するものでなければなりません。
-    - Kaedeの現在の動作を前提にしてしまうと、該当箇所の実装に誤りがある際に自動テストを通過してしまい、早期発見ができません。
-    - 自動テストが現在の動作を前提にするということは、自動テストが実質的に「現状の動作と一致しているか」を確認するためのものになってしまい、本来の意味を成しません。
-    - 実装の誤った箇所を発見し修正した場合、自動テストがそれ以前の動作を前提としていれば、その修正に問題がなかったとしてもテストは通過しません。テスト内容の更新の手間が増える上、信頼性を損ないます。
-    - 前述した理由もあり、テスト内容の更新時は、Kaedeのソースコードや動作を一切信用/信頼せず、実際のプロトコルの仕様に準拠した内容にしてください。これは、ソースコードの該当箇所をあなたが書いていて、準拠している自信が十分にあったとしても、安全と品質のために従うべきです。
+- Use automated tests only to easily verify that all existing features in Kaede function correctly and are in full compliance with specifications such as RFCs.
+- The content of automated tests must always verify whether it is in full compliance with the strict protocol specifications, regardless of Kaede's current behavior.
+    - If you assume Kaede's current behavior, the automated tests may pass even when there is an error in the implementation, preventing early detection.
+    - If automated tests are based on current behavior, they effectively become tests for verifying consistency with the status quo, which defeats their original purpose.
+    - If an implementation error is discovered and fixed, tests will not pass if they were based on the previous behavior, even if the fix itself is correct. This increases the effort required to update test content and undermines reliability.
+    - For the reasons mentioned above, when updating test content, do not trust Kaede's source code or behavior at all; ensure the content complies with actual protocol specifications. You should follow this for safety and quality, even if you wrote the code yourself and are confident in its compliance.
 
-## Claudeによるテスト
-手動でテストを行う際、次のステップに従ってテストを実施してください。
+## Testing by Claude
+When performing manual testing, follow these steps:
 
-1. まず、バグや脆弱性などのを可能な限り多く発見してください。全てのコードを読む、コードの各パーツ毎に注意深く読む、実際にサーバーを実行する、Dockerなどの仮想環境で環境別のテストを行うなど様々な方法で工夫しながら探してください。問題かどうかの確認は行わず、多くの問題を発見することだけに集中してください。
-2. 次に、ステップ1で発見した問題を詳細な一覧にしてください。
-3. 最後に、それらの問題が本当に問題であるか検証してください。関連するコードを読む、実行される実際の動作を行毎にステップバイステップで考え本当に発生するか考える、実際の環境で検証する、インターネット上で関連するライブラリの実際の仕様を確認するなど、様々な方法で検証してください。
+1. First, discover as many bugs or vulnerabilities as possible. Use various creative methods such as reading all the code, carefully examining each part of the code, executing the server, or testing in different environments like Docker. Focus only on finding as many issues as possible without confirming whether they are actually problems.
+2. Next, create a detailed list of the issues discovered in step 1.
+3. Finally, verify whether those issues are truly problems. Use various methods such as reading related code, thinking through the actual execution flow line by line, verifying in a real environment, or checking the actual specifications of related libraries on the internet.
 
-### 補足
-この手順には次のような工夫をしています。この手順を更新する際は、これらの工夫を参考にしてください。
-- 複数ステップに分けることで各ステップに集中するようになり、より確実なテストを可能にしています。
-- ステップ2は問題の検証の前に行なっていますが、これは文書化することでより理解しやすくなり、問題の検証や修正がより簡単で確実なものになります。
+### Note
+This procedure incorporates the following approaches. Please keep these in mind when updating this procedure:
+- Dividing into multiple steps helps focus on each stage, enabling more reliable testing.
+- Step 2 is performed before verifying issues, which helps in better understanding through documentation, making the verification and correction of issues easier and more reliable.
 
-## Claudeによる修正
-問題の修正を行う際、次のステップに従って修正を実施してください。
+## Fixing by Claude
+When fixing issues, follow these steps:
 
-1. まず、その問題が本当に問題であるか検証してください。関連するコードを読む、実行される実際の動作を行毎にステップバイステップで考え本当に発生するか考える、実際の環境で検証する、インターネット上で関連するライブラリの実際の仕様を確認するなど、様々な方法で検証してください。このステップは「Claudeによるテスト」のステップ3のような事前確認が実行済みであったとしても、必ず再度実行してください。
-2. 次に、修正に必要な情報を収集してください。ステップ1と同じように、実際のコードを読んだり、インターネットで調査してください。
-3. 最後に、その問題を「Claudeによる変更」セクションのコード変更に関するルールを順守して修正してください。
+1. First, verify whether the issue is actually a problem. Use various methods such as reading related code, thinking through the actual execution flow line by line, verifying in a real environment, or checking the actual specifications of related libraries on the internet. Even if a pre-check was performed as in step 3 of "Testing by Claude," you must perform this again.
+2. Next, gather the information necessary for the fix. As in step 1, read the actual code and conduct research on the internet.
+3. Finally, fix the issue in compliance with the rules for code changes in the "Changes by Claude" section.
 
-## Claudeによる変更
-コードやコンテンツに変更を加える場合、次を遵守してください。
+## Changes by Claude
+When making changes to code or content, observe the following:
 
-- 既存のコードの構造やスタイルを維持し、シンプルかつ確実な方法を用いて、可読性の高いコードで機能の実装や問題の修正を行なってください。
-- 各機能/モジュールは他の機能/モジュールや共通部分に、その機能/モジュール専用のコードを含めないように努力してください。追加する以外の方法が全く存在しない場合、追加されるコードを最低限に抑えてください。
-- 慎重に実装方法を検討してください。特に、安全性や信頼性には十分注意してください。
-- 人間が変更内容を誤解なく完全な状態で理解できる必要があります。作業中に中程度の頻度で詳細な作業ログを目立つ形で提供してください。
-- 新機能の実装時などの場合、自動テストにそれらの機能に関する高品質かつ詳細なテストを可能な限り多く追加してください。追加時には、必ずテスト項目の拡充についての規則を遵守してください。
-- 作業後に必ずテストを実行してください。pytestによる自動テスト、または「Claudeによるテスト」セクションの手順を実行してください。なお、自動テストに加えて「Claudeによるテスト」セクションの規則に準拠した手動でのテストを実行することを強く推奨します。
+- Maintain the structure and style of existing code, and use simple and reliable methods to implement features or fix issues with highly readable code.
+- Strive to ensure that each feature or module does not contain code specific to other features, modules, or common areas. If there is absolutely no way other than adding it, keep the added code to a minimum.
+- Carefully consider implementation methods. In particular, pay close attention to safety and reliability.
+- It must be possible for humans to understand the changes completely and without misunderstanding. Provide detailed work logs in a prominent form at a medium frequency during work.
+- When implementing new features, add as many high-quality and detailed tests as possible to the automated tests. When adding, strictly observe the rules for expanding test items.
+- Always run tests after completing work. Execute automated tests with pytest or the steps in the "Testing by Claude" section. It is strongly recommended to perform manual testing compliant with the "Testing by Claude" section in addition to automated tests.
 
-人間によるレビューで承認され、人間によりコミットの作成が要求された場合、次を遵守した上でコミットを作成することができます。
+When approved by human review and a human requests the creation of a commit, you may create a commit after observing the following:
 
-- 実際にコミットを作成する前に、作成する際に使用するコミットメッセージや、コミットに含める(つまり、`git add`でステージングする)変更を詳細にまとめ、人間に伝え、承認され次第コミットを作成してください。
-- コミットメッセージは日本語または英語で書いてください。
-- コミットメッセージの1行目のテキストは、コミットの内容や2/3行目以降の内容を知らない場合でも簡単にコミットの内容を理解できるものにしてください。
-- コミットメッセージの2/3行目以降で、より詳細な変更内容をまとめてください。
-- コミットメッセージの1行目に`Claude: `プレフィックスを付けてください。
-- `Assisted-by: AGENT_NAME:MODEL_VERSION [TOOL 0] [TOOL 1]`の形式のトレーラーをコミットに含ませてください。
-    - `AGENT_NAME`には`Claude`/`ChatGPT`/`Gemini`のような名称を使用してください。
-    - `MODEL_VERSION`には`claude-sonnet-4.6`のようなテキストを使用してください。
-    - `[TOOL 0] [TOOL 1]`の部分は、コードを分析するのに使用したツールの名称を空白区切りで記載してください。
-        - ファイル編集、Web検索/閲覧、gitやuv、clangなどの日常的に使用される基本的なシステムやツールについては、記載する必要はありません。
+- Before actually creating the commit, summarize the commit message and the changes to be included (i.e., staged with git add) in detail, inform the human, and create the commit once approved.
+- Write the commit message in Japanese or English.
+- The first line of the commit message should allow for easy understanding of the commit content even without knowing the details in the following lines.
+- Summarize more detailed changes from the second/third line onwards.
+- Add the "Claude: " prefix to the first line of the commit message.
+- Include a trailer in the format "Assisted-by: AGENT_NAME:MODEL_VERSION [TOOL 0] [TOOL 1]" in the commit.
+    - Use names like "Claude", "ChatGPT", or "Gemini" for AGENT_NAME.
+    - Use text like "claude-sonnet-4.6" for MODEL_VERSION.
+    - For [TOOL 0] [TOOL 1], list the names of the tools used to analyze the code, separated by spaces.
+        - You do not need to list basic daily system tools like file editing, web search/browsing, git, uv, or clang.
