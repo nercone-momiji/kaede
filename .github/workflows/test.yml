@@ -13,12 +13,15 @@ jobs:
       version: ${{ steps.openssl-version.outputs.version }}
       cache-key: ${{ steps.openssl-version.outputs.cache-key }}
 
+    env:
+      GH_TOKEN: ${{ github.token }}
+
     steps:
       - name: Resolve latest OpenSSL 3.x version
         id: openssl-version
         run: |
-          VERSION=$(curl -fsSL "https://api.github.com/repos/openssl/openssl/releases?per_page=100" \
-            | jq -r '[.[] | select(.prerelease == false and .draft == false) | select(.tag_name | test("^openssl-3\\.")) | .tag_name] | first | ltrimstr("openssl-")')
+          VERSION=$(gh api repos/openssl/openssl/releases --paginate \
+            -q '[.[] | select(.prerelease == false and .draft == false) | select(.tag_name | test("^openssl-3\\.")) | .tag_name] | first | ltrimstr("openssl-")')
           echo "Resolved OpenSSL version: ${VERSION}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "cache-key=openssl-${VERSION}-${{ runner.os }}-v3" >> $GITHUB_OUTPUT
