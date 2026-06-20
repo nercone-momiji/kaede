@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "pytest-cov"]
+dev = ["pytest", "pytest-asyncio"]
 
 [project.urls]
 GitHub = "https://github.com/nercone-rear/kaede/"

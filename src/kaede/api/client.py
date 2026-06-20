@@ -8,17 +8,16 @@ from urllib.parse import urlsplit
 from importlib.metadata import version
 
 from ..tls import TLSContext, TLSClientConfig
-from ..http import H1, Request, Response, Headers
-from ..http.process import process_response
-from ..websocket import WebSocket, generate_key, check_accept
-from ..handler.tcp import TCPProtocol, WSClientProtocol
+from ..http import H1, Request, Response, Headers, process_response
 from ..http.h1 import H1Connection, H1Protocol
 from ..http.h2 import H2Connection
 from ..http.h3 import H3Connection, connect_quic
+from ..handler import TCPProtocol, WSClientProtocol
+from ..websocket import WebSocket, generate_key, check_accept
 
 @dataclass
 class Config:
-    user_agent: str = f"Kaede/{version('nercone-kaede')} (+https://github.com/nercone-aki/kaede/)"
+    user_agent: str = f"Kaede/{version('nercone-kaede')} (+https://github.com/nercone-rear/kaede/)"
 
     protocols: list[Literal["http/1.1", "h2", "h3"]] = field(default_factory=lambda: ["h3", "h2", "http/1.1"])
 
@@ -244,24 +243,16 @@ class Handler:
         return protocol.connection
 
     async def connect_quic(self, host: str, port: int, authority: str) -> H3Connection:
-        return await connect_quic(
-            self,
-            host,
-            port,
-            authority,
-            server_name=host,
-            tls_config=self.config.tls,
-            connect_timeout=self.config.connect_timeout,
-        )
-
-    def release_h1(self, conn: H1Connection):
-        if conn.is_open() and conn.reusable:
-            self.idle.setdefault(conn.key, []).append(conn)
-        else:
-            self.discard(conn)
-            conn.close()
+        return await connect_quic(self, host, port, authority, server_name=host, tls_config=self.config.tls, connect_timeout=self.config.connect_timeout)
 
     def discard(self, conn):
+        if isinstance(conn, H1Connection):
+            if conn.is_open() and conn.reusable:
+                self.idle.setdefault(conn.key, []).append(conn)
+            else:
+                self.discard(conn)
+                conn.close()
+
         if conn in self.connections:
             self.connections.discard(conn)
 
@@ -287,7 +278,6 @@ class Handler:
         conn = await self.get_connection(request.scheme, host, port, authority)
 
         response = await conn.request(request, streaming)
-
         response = await process_response(response, self.config)
 
         return response
@@ -329,18 +319,16 @@ class Handler:
         loop = asyncio.get_running_loop()
         protocol = WSClientProtocol(loop, self.config.max_websocket_message_size, tls_context=tls_context, server_name=host if tls_context else None)
 
-        await asyncio.wait_for(
-            loop.create_connection(lambda: protocol, host, port),
-            timeout=self.config.connect_timeout,
-        )
-
+        await asyncio.wait_for(loop.create_connection(lambda: protocol, host, port), timeout=self.config.connect_timeout)
         await asyncio.wait_for(protocol.ready, self.config.connect_timeout)
 
         key = generate_key()
+
         request.headers.set("Upgrade", "websocket")
         request.headers.set("Connection", "Upgrade")
         request.headers.set("Sec-WebSocket-Key", key)
         request.headers.set("Sec-WebSocket-Version", "13")
+
         if subprotocols:
             request.headers.set("Sec-WebSocket-Protocol", ", ".join(subprotocols))
 

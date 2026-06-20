@@ -7,11 +7,11 @@ from dataclasses import dataclass
 
 from . import frame as frames
 from . import packet
+from .tls import QuicTLS
 from .packet import Buffer, encode_uint_var
 from .crypto import PacketKeys, suite_for, initial_keys, verify_retry_integrity_tag, LEVEL_INITIAL, LEVEL_EARLY, LEVEL_HANDSHAKE, LEVEL_APPLICATION, INITIAL_CIPHER
 from .stream import Stream, StreamSender, StreamReceiver, stream_is_bidirectional, stream_is_client_initiated
 from .recovery import Recovery, SentPacket, Space, level_to_space, SPACE_INITIAL, SPACE_HANDSHAKE, SPACE_APPLICATION
-from .tls import QuicTLS
 
 MAX_DATAGRAM_SIZE = 1350
 INITIAL_DATAGRAM_MIN = 1200

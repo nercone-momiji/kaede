@@ -10,9 +10,9 @@ from typing import Literal
 
 from .models import Request, Response, Headers
 from .errors import HTTPVersionNotSupportedError, HTTPMethodNotImplementedError
+from .process import process_request, collect_early_hints
 from .trailers import build_trailers
 from ..tls import TLSInfo
-from .process import process_request, collect_early_hints
 from ..websocket import WebSocket, WebSocketProtocolError, compute_accept, parse_frames
 from ..constants import Characters
 from ..handler.common import StreamState, consume_response, negotiate_websocket, MAX_RESPONSE_HEADER_SIZE
@@ -1101,7 +1101,7 @@ class H1Connection:
         self.transport.write(H1.build_request(request))
 
         def on_done():
-            self.handler.release_h1(self)
+            self.handler.discard(self)
 
         try:
             return await consume_response(self.current, streaming, "HTTP/1.1", self.config.read_timeout, on_done)
