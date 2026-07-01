@@ -1,5 +1,7 @@
+from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional, Union
+from typing import Any, Union
+from dataclasses import dataclass
 
 class DNSRecordType(Enum):
     A          = 1
@@ -55,8 +57,32 @@ class DNSRecordType(Enum):
     IXFR       = 251
     OPT        = 41
 
+class DNSRecordClass(Enum):
+    IN = "Internet"
+    CS = "CSNET"
+    CH = "Chaosnet"
+    HS = "Hesiod"
+
+class DNSRecordData(ABC):
+    @abstractmethod
+    def pack(self) -> bytes:
+        ...
+
+    @classmethod
+    @abstractmethod
+    def unpack(cls, raw: bytes, message: bytes, offset: int) -> "DNSRecordData":
+        ...
+
+@dataclass(frozen=True, slots=True)
+class DNSRecord:
+    name: str
+    type: DNSRecordType
+    rclass: DNSRecordClass = DNSRecordClass.IN
+    ttl: int = 0
+    data: DNSRecordData
+
 class DNSRecords:
-    def __init__(self, value: Union[str, bytes, list[tuple[DNSRecordType, Union[str, bytes], Union[str, bytes]]]]):
+    def __init__(self, value: Union[str, bytes, list[DNSRecord]]):
         if isinstance(value, (str, bytes)):
             self.raw = DNSRecords.parse(value).raw
         elif isinstance(value, list):
